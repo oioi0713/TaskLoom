@@ -1,0 +1,98 @@
+{
+  "goal_summary": "调研并总结 Redis 作为 Agent Memory 后端的适用性",
+  "assumptions": [
+    "只使用公开技术资料",
+    "本阶段不执行任何外部写操作"
+  ],
+  "tasks": [
+    {
+      "task_id": "research_redis",
+      "title": "调研 Redis Memory",
+      "description": "收集 Redis 用于 Agent Memory 的实现方式、优势和限制",
+      "task_type": "research",
+      "dependencies": [],
+      "priority": 10,
+      "assigned_agent_id": "redis_researcher",
+      "output_contract": "research_result_v1",
+      "status": "pending",
+      "retry_count": 0,
+      "max_retries": 2
+    },
+    {
+      "task_id": "write_report",
+      "title": "生成调研报告",
+      "description": "根据 Redis 调研结果编写结构化报告",
+      "task_type": "report",
+      "dependencies": [
+        "research_redis"
+      ],
+      "priority": 5,
+      "assigned_agent_id": "report_writer",
+      "output_contract": "report_result_v1",
+      "status": "pending",
+      "retry_count": 0,
+      "max_retries": 2
+    }
+  ],
+  "agents": [
+    {
+      "agent_id": "redis_researcher",
+      "task_id": "research_redis",
+      "role": "Redis 技术调研员",
+      "objective": "调研 Redis 作为 Agent Memory 后端的实现方式与限制",
+      "instructions": [
+        "优先提取官方资料中的事实",
+        "明确区分已验证事实和分析判断"
+      ],
+      "required_capabilities": [
+        "web_research"
+      ],
+      "requested_tools": [
+        "web_search",
+        "web_page_reader"
+      ],
+      "knowledge_scope": [
+        "Redis",
+        "Agent Memory"
+      ],
+      "output_contract": "research_result_v1",
+      "timeout_seconds": 120,
+      "max_steps": 8,
+      "token_budget": 8000,
+      "can_delegate": false
+    },
+    {
+      "agent_id": "report_writer",
+      "task_id": "write_report",
+      "role": "技术报告撰写员",
+      "objective": "将已验证的调研结果整理成结构化技术报告",
+      "instructions": [
+        "只使用依赖任务提供的材料",
+        "保留结论对应的限制条件"
+      ],
+      "required_capabilities": [
+        "report_writing"
+      ],
+      "requested_tools": [],
+      "knowledge_scope": [
+        "research_redis"
+      ],
+      "output_contract": "report_result_v1",
+      "timeout_seconds": 120,
+      "max_steps": 8,
+      "token_budget": 8000,
+      "can_delegate": false
+    }
+  ],
+  "expected_deliverable": "一份说明 Redis Memory 实现方式、优势和限制的结构化报告",
+  "budget": {
+    "max_workers": 8,
+    "max_concurrency": 3,
+    "max_retries_per_task": 2,
+    "max_replans": 2,
+    "max_total_steps": 30,
+    "max_worker_timeout_seconds": 120,
+    "max_worker_token_budget": 8000,
+    "total_token_budget": 64000
+  }
+}

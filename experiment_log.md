@@ -50,3 +50,118 @@ tests/test_main.py     验证完整启动过程
 - 当前版本只完成开发计划阶段 0，提供可运行的项目骨架。
 - 尚未实现核心数据协议、注册表、Plan Guard、LangGraph 工作流和真实 Agent。
 - 当前 Conda 环境中存在与 TaskLoom 无关的旧包依赖缺失，但不会影响阶段 0 的应用启动和测试。
+
+## v0.2.0——阶段 1：核心数据协议和注册表
+
+日期：2026-11-02
+
+### 新增功能
+
+| 功能模块 | 文件位置 | 作用和实现说明 |
+|---|---|---|
+| Task 任务协议 | `app/contracts/task.py` | 定义单个任务必须包含的字段、允许状态、重试限制和基础字段校验，使 Planner、Supervisor 和 Worker 使用同一种任务格式。 |
+| Worker 配置协议 | `app/contracts/subagent.py` | 定义 Planner 申请的 Worker 配置以及 Supervisor 授权后的配置；限制 Worker 的能力、工具、超时、步骤、Token 和委派权限。 |
+| Worker 结果协议 | `app/contracts/result.py` | 统一记录 Worker 的执行状态、结构化输出、来源、错误、耗时、Token 用量和工具调用记录。 |
+| Reviewer 决策协议 | `app/contracts/review.py` | 统一 Reviewer 的完成、定向重试、重新规划和失败决定，并记录问题与修改建议。 |
+| 执行预算协议 | `app/contracts/budget.py` | 限制 Worker 总数、最大并发数、重试次数、重新规划次数、总步骤、单任务超时和 Token 预算。 |
+| 完整计划协议 | `app/contracts/plan.py` | 将任务、Worker 配置、交付物和预算组合成一份完整计划，并检查重复的 `task_id` 和 `agent_id`。 |
+| AgentState | `app/graph/state.py` | 定义未来 LangGraph 节点之间共享的状态；并行 Worker 的结果、错误和事件使用 reducer 追加，避免互相覆盖。 |
+| Capability Registry | `app/policies/capability_registry.py` | 保存系统允许使用的能力名称以及每种能力允许申请的工具，防止 Planner 编造能力。 |
+| Tool Registry | `app/tools/registry.py` | 保存系统已知工具的名称、用途和风险类型。阶段 1 只登记工具元数据，尚未实现真实工具调用。 |
+| 工具授权策略 | `app/policies/tool_policy.py` | 根据 Planner 请求、能力允许范围、用户权限和系统启用状态计算最终授权工具。 |
+| Output Contract Registry | `app/contracts/output_registry.py` | 保存调研、比较、实验计划和报告四种标准输出协议，并用对应 Pydantic 模型校验 Worker 输出。 |
+
+### 标准 Task 格式
+
+每个任务必须符合下面的 JSON 结构：
+
+```json
+{
+  "task_id": "research_redis",
+  "title": "调研 Redis Memory",
+  "description": "收集 Redis 用于 Agent Memory 的实现方式、优势和限制",
+  "task_type": "research",
+  "dependencies": [],
+  "priority": 10,
+  "assigned_agent_id": "redis_researcher",
+  "output_contract": "research_result_v1",
+  "status": "pending",
+  "retry_count": 0,
+  "max_retries": 2
+}
+```
+
+字段说明：
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---:|---|
+| `task_id` | 字符串 | 是 | 任务唯一标识。必须以英文字母开头，只能包含英文字母、数字、下划线和连字符，最大长度为 64。 |
+| `title` | 字符串 | 是 | 简短的任务名称，不能为空。 |
+| `description` | 字符串 | 是 | 任务需要完成的具体内容，不能为空。 |
+| `task_type` | 字符串 | 是 | 任务类别，例如 `research`、`comparison` 或 `report`。 |
+| `dependencies` | 字符串列表 | 否 | 当前任务依赖的其他 `task_id`。默认为空列表，同一依赖不能重复，任务不能依赖自身。 |
+| `priority` | 整数 | 否 | 调度优先级，数值越大表示越优先。默认为 0。 |
+| `assigned_agent_id` | 字符串 | 是 | 负责该任务的 Worker 配置 ID，格式规则与 `task_id` 相同。 |
+| `output_contract` | 字符串 | 是 | 任务必须返回的输出协议，只能选择注册表中已有的协议。 |
+| `status` | 字符串 | 否 | 任务状态，默认为 `pending`。 |
+| `retry_count` | 整数 | 否 | 当前已经重试的次数，默认为 0，不能超过 `max_retries`。 |
+| `max_retries` | 整数 | 否 | 任务最多允许重试的次数，默认为 2，当前系统上限也是 2。 |
+
+允许的任务状态：
+
+```text
+pending、ready、running、completed、failed、blocked、skipped
+```
+
+允许的输出协议：
+
+```text
+research_result_v1
+comparison_result_v1
+experiment_plan_v1
+report_result_v1
+```
+
+### 当前测试检查范围
+
+测试使用 `tests/fixtures/valid_plan.json` 中的手写计划，而不是读取 development plan Markdown 文档。Pydantic 会遍历 `tasks` 列表，并将每个元素分别校验为 `TaskSpec`。
+
+阶段 1 已检查：
+
+- Task 必填字段、字段类型和 ID 格式；
+- Task 状态和输出协议是否合法；
+- 重试次数是否超过限制；
+- Task 是否依赖自身或重复声明同一依赖；
+- 完整计划中是否存在重复的 `task_id`；
+- Worker 的必填字段、能力、工具、超时、步骤和 Token 是否合法；
+- Worker 是否尝试把 `can_delegate` 设置为 `true`；
+- 完整计划中是否存在重复的 `agent_id`；
+- 完整手写计划 JSON 是否可以成功加载。
+
+阶段 2 的 Plan Guard 将继续检查：
+
+- `dependencies` 中引用的任务是否真实存在；
+- 任务之间是否存在循环依赖；
+- 每个 Task 是否准确对应一个 Worker；
+- Task 和 Worker 的输出协议是否一致；
+- 是否至少存在一个可以立即执行的任务；
+- 整个依赖图是否能够正常执行完成。
+
+可以简单理解为：
+
+```text
+阶段 1：检查每张任务表填写得是否规范。
+阶段 2：检查这些任务组合起来是否真的可以执行。
+```
+
+### 验证结果
+
+- 应用启动：执行 `python -m app.main` 成功。
+- 完整计划：成功加载 2 个 Task 和 2 个 Worker 配置。
+- 测试结果：共 22 个测试，全部通过。
+
+### 已知限制
+
+- 当前只完成数据格式和注册表级校验，尚未实现阶段 2 的完整 Plan Guard。
+- Tool Registry 当前只包含工具元数据，没有接入真实工具实现。
+- 当前没有真实 Planner、Supervisor、Worker 或 Reviewer Agent。
