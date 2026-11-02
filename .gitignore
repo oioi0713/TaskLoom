@@ -27,3 +27,7 @@ Thumbs.db
 
 # Runtime output
 *.log
+
+# Local development plans
+/taskloom-development-plan.md
+/docs/taskloom-development-plan.md
