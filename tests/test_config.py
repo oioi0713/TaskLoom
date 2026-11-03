@@ -28,3 +28,16 @@ def test_settings_read_prefixed_environment_variables(monkeypatch: pytest.Monkey
 def test_invalid_worker_limit_is_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, max_workers=0)
+
+
+def test_blank_llm_values_are_normalized() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_model="  ",
+        llm_api_key="  ",
+        llm_base_url="",
+    )
+
+    assert settings.llm_model == ""
+    assert settings.llm_api_key is None
+    assert settings.llm_base_url is None

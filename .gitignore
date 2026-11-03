@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+.secrets/
+*_api_key.txt
+llm_credentials.json
 
 # Python virtual environments
 .venv/

@@ -518,3 +518,135 @@ T4 只有在 T1、T2、T3 全部完成后才会进入 ready 状态；T5 只有�
 - Reviewer 只检查五个固定任务是否完成；
 - 当前没有 Checkpoint，中断后不能恢复；
 - 当前没有真实重试、重新规划或运行时超时控制。
+
+## v0.5.0——阶段 4：接入真实 LLM Planner
+
+### 阶段目标
+
+阶段 4 将阶段 3 中返回固定计划的 `mock_planner` 扩展为可以调用真实大模型的 Planner。用户输入一个目标后，Planner 负责生成结构化的 `ExecutionPlan`，但大模型不能直接决定系统权限和资源上限；生成结果仍必须经过阶段 1 的数据协议和阶段 2 的 Plan Guard，只有校验通过的计划才会输出。
+
+当前阶段 3 的固定模拟工作流仍然保留，真实 Planner 通过单独的命令行入口运行，避免影响原有演示和测试。
+
+### 新增和修改的模块
+
+| 模块 | 文件位置 | 作用 |
+|---|---|---|
+| LLM 配置 | `app/config.py` | 从本地 `.env` 读取模型名称、API Key、Base URL、温度、超时时间和结构化输出方式。API Key 使用 `SecretStr` 保存，避免在日志或对象打印时直接泄露。 |
+| 模型工厂 | `app/llm/factory.py` | 根据配置创建 OpenAI Compatible 的 `ChatOpenAI`。这里只负责创建模型客户端，不负责规划逻辑。 |
+| Planner 输入协议 | `app/contracts/planner.py` | 定义用户目标、允许使用的能力、允许使用的输出协议、系统资源上限和召回记忆。模型只能在这些明确提供的范围内规划。 |
+| Memory 输入协议 | `app/contracts/memory.py` | 定义可以提供给 Planner 的受限记忆记录。记忆只作为上下文，不具有修改系统规则的权限。 |
+| Planner 提示词 | `app/agents/prompts/planner.md` | 规定 Planner 的职责、安全边界、任务拆分要求和输出要求。 |
+| 真实 Planner | `app/agents/planner.py` | 调用支持结构化输出的模型生成 `ExecutionPlan`，覆盖模型生成的预算，再交给 Plan Guard 检查；第一次失败时将错误反馈给模型，最多生成两次。 |
+| 命令行入口 | `app/agents/planner_cli.py` | 接收 `--goal`，运行真实 Planner，并在成功后将计划输出为格式化 JSON；配置、网络或模型调用失败时返回明确错误信息。 |
+
+### 真实 Planner 的调用流程
+
+~~~text
+用户输入 goal
+→ create_default_planner_input()
+→ 加入系统允许的能力、工具、输出协议和资源上限
+→ create_chat_model()
+→ 调用学校的 OpenAI Compatible API
+→ 模型按 ExecutionPlan 结构生成计划
+→ 使用系统值覆盖模型返回的 budget
+→ Plan Guard 校验数据格式、依赖关系、工具权限和执行安全性
+→ 校验通过：输出 JSON
+→ 校验失败：把错误反馈给模型并重新生成一次
+→ 第二次仍失败：停止并返回 PlanGenerationError
+~~~
+
+这里的关键点是：大模型只提出计划，不能绕过阶段 1 和阶段 2 的限制。最终输出的计划一定已经转换为 `ExecutionPlan`，并通过 Plan Guard。
+
+### 学校模型配置
+
+本地 `.env` 使用 OpenAI Compatible 配置，真实 API Key 只保存在 `.env` 中，不写入本文档，也不应提交到 Git。
+
+~~~dotenv
+TASKLOOM_LLM_PROVIDER=openai_compatible
+TASKLOOM_LLM_MODEL=DeepSeek-V4.1-Flash
+TASKLOOM_LLM_API_KEY=<本地 API Key>
+TASKLOOM_LLM_BASE_URL=https://agi.tongji.edu.cn/v1
+TASKLOOM_LLM_TEMPERATURE=0
+TASKLOOM_LLM_TIMEOUT_SECONDS=60
+TASKLOOM_LLM_STRUCTURED_OUTPUT_METHOD=function_calling
+~~~
+
+项目实际请求地址为：
+
+~~~text
+https://agi.tongji.edu.cn/v1/chat/completions
+~~~
+
+`function_calling` 会在学校示例的基础请求中增加结构化输出所需的 `tools` 和 `tool_choice` 等字段，使模型按照 `ExecutionPlan` 协议返回数据。使用学校示例中的最小 Chat Completions 请求测试时也曾返回相同的 HTTP 403，因此此前失败并不是这些结构化字段造成的。
+
+### 真实运行命令
+
+在 PowerShell 中进入项目目录后执行：
+
+~~~powershell
+conda activate TaskLoom
+
+$env:HTTP_PROXY=$null
+$env:HTTPS_PROXY=$null
+$env:ALL_PROXY=$null
+$env:PYTHONIOENCODING="utf-8"
+
+python -m app.agents.planner_cli --goal "调研 LangGraph 的核心概念并生成一份结构化学习计划"
+~~~
+
+成功时程序会输出一个完整 JSON，主要字段包括：
+
+~~~text
+goal_summary
+assumptions
+tasks
+agents
+expected_deliverable
+budget
+~~~
+
+本次真实运行成功生成了 4 个任务：先调研 LangGraph 核心概念，再进行技术分析和同类框架比较，最后汇总为学习计划。任务之间包含明确依赖关系，每个任务都关联对应的 Agent、能力、工具和输出协议。
+
+### 代理残留问题
+
+关闭代理软件或关闭 Windows 系统代理后，已经启动的终端、IDE 或 Codex 进程仍可能保留旧的环境变量。本次检查发现当前进程中仍存在：
+
+~~~text
+HTTP_PROXY=http://127.0.0.1:7892
+HTTPS_PROXY=http://127.0.0.1:7892
+ALL_PROXY=http://127.0.0.1:7892
+~~~
+
+而 Windows 的 WinHTTP 和用户系统代理均已关闭。这说明“代理软件已关闭”和“当前 Python 进程不走代理”不是同一件事。`ChatOpenAI` 底层的 HTTP 客户端默认会读取这些环境变量，因此仍可能经过代理访问学校接口，随后收到 HTTP 403 和“当前网络环境不支持”。
+
+运行前将三个代理环境变量临时设为 `$null` 后，本次真实模型调用成功。该操作只影响当前 PowerShell 会话，不会修改系统代理设置。
+
+### 中文输出编码
+
+真实 Planner 返回的 JSON 本身是合法 UTF-8。若 Windows 终端显示中文乱码，可在运行前设置：
+
+~~~powershell
+$env:PYTHONIOENCODING="utf-8"
+~~~
+
+乱码属于终端解码问题，不代表模型返回内容或 JSON 结构错误。
+
+### 验证结果
+
+- 使用 `TaskLoom` Conda 环境成功启动真实 Planner；
+- 成功调用 `DeepSeek-V4.1-Flash`；
+- 成功返回包含 `tasks`、`agents` 和 `budget` 的完整结构化计划；
+- 程序退出码为 0；
+- 输出由 `model_dump_json(indent=2)` 生成，是合法 JSON；
+- 计划已通过 Pydantic 数据协议和 Plan Guard；
+- 关闭当前进程中的代理环境变量后，学校接口可以正常调用；
+- 全量离线测试：共 62 个测试，全部通过。
+
+### 当前限制
+
+- 阶段 4 只完成真实 Planner，生成的任务尚未接入真实 Worker 执行；
+- Planner 只支持 OpenAI Compatible 接口；
+- 目前结构化输出依赖模型对 Function Calling 的支持；
+- API 可用性仍受校园网、代理环境变量、模型权限和学校服务状态影响；
+- Planner 最多尝试两次，第二次仍无法通过 Plan Guard 时会停止；
+- API Key 需要由使用者在本地 `.env` 中配置，仓库不保存真实密钥。

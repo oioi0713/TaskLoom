@@ -6,22 +6,13 @@ from typing import Annotated, Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.budget import ExecutionBudget
+from app.contracts.memory import MemoryItem
 from app.contracts.plan import ExecutionPlan
 from app.contracts.result import WorkerResult
 from app.contracts.review import ReviewerDecision
 from app.contracts.subagent import SubAgentSpec
 from app.contracts.task import TaskSpec
 from app.contracts.types import NonEmptyStr
-
-
-class MemoryItem(BaseModel):
-    """Minimal recalled-memory record passed into a workflow run."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    memory_id: NonEmptyStr
-    content: NonEmptyStr
-    scope: list[NonEmptyStr] = Field(default_factory=list)
 
 
 class WorkflowEvent(BaseModel):
