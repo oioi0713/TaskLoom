@@ -6,6 +6,7 @@ from typing import Annotated, Any, Literal, TypedDict
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.budget import ExecutionBudget
+from app.contracts.plan import ExecutionPlan
 from app.contracts.result import WorkerResult
 from app.contracts.review import ReviewerDecision
 from app.contracts.subagent import SubAgentSpec
@@ -55,3 +56,19 @@ class AgentState(TypedDict):
     final_output: str | None
     errors: Annotated[list[str], operator.add]
     events: Annotated[list[WorkflowEvent], operator.add]
+
+
+class Stage3State(AgentState):
+    """Additional state used by the no-LLM stage-three workflow."""
+
+    execution_plan: ExecutionPlan | None
+    workflow_status: Literal["created", "running", "completed", "failed"]
+
+
+class WorkerInput(TypedDict):
+    """Isolated input sent to one short-lived mock worker invocation."""
+
+    run_id: str
+    task: TaskSpec
+    spec: SubAgentSpec
+    dependency_results: list[WorkerResult]

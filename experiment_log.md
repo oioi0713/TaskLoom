@@ -328,3 +328,193 @@ test_plan_guard.py
 - 安全降级只处理工具、委派和资源上限，不会自动修改依赖关系；
 - 当前没有执行 Worker，因此尚未验证运行过程中的动态死锁和失败恢复；
 - Supervisor 调度和并行 Worker 执行将在后续阶段实现。
+
+## v0.4.0——阶段 3：无 LLM 的最小 LangGraph 工作流
+
+日期：2026-11-03
+
+### 新增功能
+
+阶段 3 将阶段 1 的数据协议和阶段 2 的 Plan Guard 接入真正的 LangGraph 工作流，但所有计划和任务结果仍使用固定模拟数据，不调用真实 LLM 或外部工具。
+
+~~~text
+START
+→ mock_planner
+→ validate_plan
+→ supervisor
+→ worker
+→ aggregate
+→ supervisor
+→ reviewer
+→ END
+~~~
+
+固定任务为：
+
+~~~text
+T1：调研 Redis Memory
+T2：调研向量记忆
+T3：调研文件式记忆
+T4：比较三种方案，依赖 T1、T2、T3
+T5：生成报告，依赖 T4
+~~~
+
+### LangGraph 节点说明
+
+节点通过下面的形式注册：
+
+~~~python
+builder.add_node("节点名称", 节点执行函数)
+~~~
+
+add_node() 只负责注册节点，不会立即执行函数。图开始运行后，LangGraph 才按照边和条件路由调用节点。
+
+| 节点 | 执行函数 | 文件位置 | 作用 |
+|---|---|---|---|
+| mock_planner | mock_planner_node | app/agents/planner.py | 模拟 Planner，生成固定的 T1～T5 计划，不调用 LLM。 |
+| validate_plan | validate_plan_node | app/graph/nodes.py | 调用阶段 2 的 Plan Guard，只有合法计划才能进入 Supervisor。 |
+| supervisor | supervisor_node | app/agents/supervisor.py | 根据已完成任务和 dependencies 选择当前可以执行的任务，并限制最大并发数。 |
+| worker | worker_runtime.execute | app/workers/runtime.py | 执行一个动态传入的 Task。图中只有一个 Worker 节点定义，但可以通过 Send 并行调用多次。 |
+| aggregate | aggregate_node | app/graph/nodes.py | 根据 reducer 已经合并的 WorkerResult 更新 Task 状态，然后返回 Supervisor 继续调度。 |
+| reviewer | reviewer_node | app/agents/reviewer.py | 检查 T1～T5 是否全部成功，生成 finish 或 fail 决定并结束工作流。 |
+
+需要注意：LangGraph Node 不一定是 Agent。当前 mock_planner、worker 和 reviewer 代表 Agent 角色；validate_plan 和 aggregate 是确定性数据处理节点；supervisor 当前也是规则调度节点。
+
+### Send 并行代码位置
+
+Send 的动态路由代码位于：
+
+~~~text
+app/graph/routes.py
+route_supervisor()
+~~~
+
+核心实现为：
+
+~~~python
+for task_id in ready_task_ids:
+    task = tasks_by_id[task_id]
+    dependency_results = [
+        results_by_task_id[dependency]
+        for dependency in task.dependencies
+        if dependency in results_by_task_id
+    ]
+    sends.append(
+        Send(
+            "worker",
+            {
+                "run_id": state["run_id"],
+                "task": task,
+                "spec": specs_by_task_id[task_id],
+                "dependency_results": dependency_results,
+            },
+        )
+    )
+
+return sends
+~~~
+
+项目中没有逐行写死：
+
+~~~python
+Send("worker", T1的数据)
+Send("worker", T2的数据)
+Send("worker", T3的数据)
+~~~
+
+第一次进入 route_supervisor() 时，Supervisor 已经计算出：
+
+~~~python
+ready_task_ids = ["T1", "T2", "T3"]
+~~~
+
+因此循环实际生成三个 Send：
+
+~~~text
+Send("worker", T1 的 Task、Worker 配置和依赖结果)
+Send("worker", T2 的 Task、Worker 配置和依赖结果)
+Send("worker", T3 的 Task、Worker 配置和依赖结果)
+~~~
+
+LangGraph 收到三个 Send 后，会并行调用三次同一个 worker 节点。worker 节点在 app/graph/builder.py 中注册：
+
+~~~python
+builder.add_node("worker", worker_runtime.execute)
+~~~
+
+所以每个 Send 最终都会调用：
+
+~~~python
+worker_runtime.execute(本次 Send 携带的数据)
+~~~
+
+三次调用使用同一个执行函数，但 task、spec 和 dependency_results 不同。固定的是图和 Worker 节点，动态的是传入 Worker 的任务配置。
+
+### Reducer 与 Aggregate 的区别
+
+Stage3State 中的 worker_results 使用 reducer：
+
+~~~python
+worker_results: Annotated[list[WorkerResult], operator.add]
+~~~
+
+T1、T2、T3 并行返回后，reducer 负责将三个列表相加：
+
+~~~text
+[WorkerResult(T1)]
++ [WorkerResult(T2)]
++ [WorkerResult(T3)]
+= [WorkerResult(T1), WorkerResult(T2), WorkerResult(T3)]
+~~~
+
+aggregate 节点不负责底层列表合并，而是读取已经合并的 WorkerResult，将对应 Task 的状态更新为 completed，再回到 Supervisor。
+
+~~~text
+reducer
+→ 合并并行 WorkerResult，避免结果互相覆盖
+
+aggregate
+→ 根据 WorkerResult 更新 Task 状态
+~~~
+
+### 实际调度顺序
+
+~~~text
+T1 started
+T2 started
+T3 started
+
+T1、T2、T3 finished
+
+T4 started
+T4 finished
+
+T5 started
+T5 finished
+
+Reviewer → finish
+~~~
+
+T4 只有在 T1、T2、T3 全部完成后才会进入 ready 状态；T5 只有在 T4 完成后才能运行。
+
+### 验证结果
+
+- T1、T2、T3 通过 Send 并行发送到同一个 Worker 节点；
+- 实测峰值并发 Worker 数为 3；
+- T4 等待 T1、T2、T3 全部完成；
+- T5 等待 T4 完成；
+- 5 个 WorkerResult 通过 reducer 正确聚合，没有重复或覆盖；
+- Reviewer 返回 action=finish，工作流状态为 completed；
+- 所有 WorkerResult 的 token_usage 均为 0；
+- 所有 WorkerResult 的 tool_calls 均为空；
+- 原有 python -m app.main 启动正常；
+- 全量测试：共 45 个测试，全部通过。
+
+### 已知限制
+
+- mock_planner 使用固定计划，没有接入真实 LLM；
+- Worker 返回固定模拟数据，没有生成式推理；
+- 当前 Worker 不调用 Tool Registry 中的真实工具；
+- Reviewer 只检查五个固定任务是否完成；
+- 当前没有 Checkpoint，中断后不能恢复；
+- 当前没有真实重试、重新规划或运行时超时控制。
