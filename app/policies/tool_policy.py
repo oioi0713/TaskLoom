@@ -6,6 +6,17 @@ from app.policies.capability_registry import allowed_tools_for
 from app.tools.registry import TOOL_REGISTRY
 
 
+HIGH_RISK_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "shell",
+        "file_writer",
+        "database_writer",
+        "message_sender",
+        "external_action",
+    }
+)
+
+
 def validate_tool_request(capabilities: list[str], requested_tools: list[str]) -> None:
     """Reject unknown tools and tools outside the worker capability template."""
 

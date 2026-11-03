@@ -165,3 +165,166 @@ report_result_v1
 - 当前只完成数据格式和注册表级校验，尚未实现阶段 2 的完整 Plan Guard。
 - Tool Registry 当前只包含工具元数据，没有接入真实工具实现。
 - 当前没有真实 Planner、Supervisor、Worker 或 Reviewer Agent。
+
+## v0.3.0——阶段 2：Plan Guard
+
+日期：2026-11-03
+
+### 新增功能
+
+| 功能模块 | 文件位置 | 作用和实现说明 |
+|---|---|---|
+| Plan Guard | app/planning/validator.py | 作为 Planner 输出进入执行系统前的统一安全入口，依次执行高风险权限预扫描、阶段 1 数据协议校验和阶段 2 计划关系校验，并返回结构化错误。 |
+| 依赖图 | app/planning/dependency_graph.py | 将 Task 列表转换为 task_id → dependencies 关系，查找不存在的依赖，并计算当前可以立即执行的任务。 |
+| 循环依赖检测 | app/planning/cycle_detector.py | 使用深度优先搜索检测循环依赖，并返回一条闭合循环路径，例如 task_a → task_b → task_a。 |
+| 高风险工具名单 | app/policies/tool_policy.py | 标记 Shell、文件写入、数据库写入、外部消息等当前阶段禁止申请的工具。 |
+| Plan Guard 测试 | tests/unit/test_plan_guard.py | 测试 Plan Guard 的完整调用流程、错误代码以及 accept、revise、degrade、terminate 决策。 |
+| 依赖算法测试 | tests/unit/test_dependency_graph.py | 单独测试依赖图构建、缺失依赖、循环检测和就绪任务排序等底层算法。 |
+
+### 阶段 1 与阶段 2 的调用关系
+
+阶段 1 和阶段 2 不是由最外围分别调用。外部系统只调用 Plan Guard，由 Plan Guard 在内部依次调用阶段 1 数据协议和阶段 2 依赖关系检查。
+
+~~~text
+Planner 原始 JSON
+        ↓
+PlanGuard.validate()
+        ↓
+高风险工具预扫描
+        ↓
+阶段 1：ExecutionPlan.model_validate()
+        ├─ TaskSpec
+        ├─ SubAgentSpec
+        ├─ ExecutionBudget
+        └─ Capability、Tool、Output Contract Registry
+        ↓
+阶段 1 是否通过？
+        ├─ 否 → 整理格式错误并返回，不执行依赖图检查
+        └─ 是
+             ↓
+阶段 2：依赖与计划关系检查
+        ├─ dependency_graph
+        ├─ cycle_detector
+        ├─ Task 与 Worker 对应关系
+        └─ Worker 数量和计划预算
+             ↓
+返回 PlanValidationReport
+~~~
+
+采用统一入口的原因是：阶段 2 必须建立在字段已经通过阶段 1 校验的基础上。例如依赖图可以确定 dependencies 一定是字符串列表，而不是缺失字段、数字或 null。这样可以防止调用者忘记执行阶段 1，直接将非法 JSON 送入依赖算法。
+
+职责可以概括为：
+
+~~~text
+阶段 1：检查每张任务表填写得是否规范。
+阶段 2：检查这些任务组合起来是否真的可以执行。
+~~~
+
+### Plan Guard 检测内容
+
+#### 输入和数据格式
+
+- Planner 输出是否为合法 JSON 对象；
+- task_id 和 agent_id 是否重复；
+- Task 是否依赖自身；
+- capability、tool 和 output contract 是否已经注册；
+- Worker 是否申请了能力不允许使用的工具；
+- Worker 是否尝试继续委派；
+- timeout、step 和 token 是否超过系统上限；
+- Worker 数量是否超过系统硬上限。
+
+#### 权限安全
+
+当前明确禁止 Planner 申请：
+
+~~~text
+shell
+file_writer
+database_writer
+message_sender
+external_action
+~~~
+
+这些工具会产生 high_risk_tool_requested 错误，未注册的工具还会同时产生 unknown_tool 错误。
+
+#### 任务依赖
+
+- dependencies 中引用的 Task 是否存在；
+- Task 之间是否存在循环依赖；
+- 是否至少有一个可以立即执行的 Task；
+- 初始就绪任务是否按照优先级和 ID 稳定排序。
+
+#### Task 与 Worker 对应关系
+
+- Task 的 assigned_agent_id 是否存在；
+- 每个 Task 是否恰好对应一个 AgentSpec；
+- Worker 是否引用了不存在的 Task；
+- Task 指定的 Worker 是否声明负责同一个 Task；
+- Task 和 Worker 是否使用相同的输出协议。
+
+#### Worker 数量
+
+~~~text
+too_many_workers
+→ Worker 数量超过系统硬上限 8
+
+worker_count_exceeded
+→ Worker 数量未超过 8，但超过本次 ExecutionBudget.max_workers
+~~~
+
+### 错误处理流程
+
+validate() 负责找出问题，evaluate() 根据问题类型和失败次数决定下一步。
+
+~~~text
+计划合法
+→ action = accept
+
+第一次计划非法
+→ action = revise
+→ 返回错误代码、字段位置和具体反馈，让 Planner 修复
+
+第二次仍然非法
+├─ 只有工具、委派、timeout、step 或 token 问题
+│  → action = degrade
+│  → 删除危险工具、关闭委派并压缩资源上限
+└─ 循环依赖、缺失依赖等结构性问题
+   → action = terminate
+   → 不擅自修改任务结构
+~~~
+
+### 为什么依赖图和 Plan Guard 分开测试
+
+test_plan_guard.py 确实会间接检测依赖图，但两个测试文件验证的层级不同。
+
+| 测试文件 | 测试对象 | 主要检查内容 |
+|---|---|---|
+| tests/unit/test_dependency_graph.py | 底层纯算法 | 依赖图能否正确构建、缺失依赖能否发现、循环路径是否正确、就绪任务排序是否稳定。 |
+| tests/unit/test_plan_guard.py | Plan Guard 统一入口 | 是否正确调用数据协议和依赖算法、是否返回正确错误代码，以及最终路由决定是否正确。 |
+
+可以简单理解为：
+
+~~~text
+test_dependency_graph.py
+→ 测试底层零件本身是否正确
+
+test_plan_guard.py
+→ 测试零件组装后，整个安全检查流程是否正确
+~~~
+
+如果只保留 Plan Guard 测试，出现失败时难以快速判断是依赖图构建、循环算法、调用关系还是错误转换出了问题。分层测试可以更快定位故障，而且依赖图算法后续还会被 Supervisor 调度器复用。
+
+### 验证结果
+
+- Python 编译检查通过；
+- 阶段 0 应用启动未受影响；
+- 有效手写计划通过 Plan Guard，结果为 action=accept；
+- 有效计划结果：executable=True，错误数量为 0；
+- 全量测试：共 39 个测试，全部通过。
+
+### 已知限制
+
+- 当前 Plan Guard 只负责计划进入执行系统前的同步校验，还没有接入真实 Planner 或 LangGraph 节点；
+- 安全降级只处理工具、委派和资源上限，不会自动修改依赖关系；
+- 当前没有执行 Worker，因此尚未验证运行过程中的动态死锁和失败恢复；
+- Supervisor 调度和并行 Worker 执行将在后续阶段实现。
