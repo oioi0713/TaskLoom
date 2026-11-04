@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import pytest
+from pydantic import ValidationError
+
+from app.contracts.memory import MemoryItem
+from app.contracts.output_models import ResearchResult
+from app.contracts.result import WorkerResult
+from app.contracts.subagent import ResolvedSubAgentSpec
+from app.contracts.task import TaskSpec
+from app.workers.context import RuntimeContext
+from app.workers.factory import (
+    WorkerContextError,
+    WorkerFactory,
+    WorkerLifecycleError,
+)
+
+
+class FakeStructuredModel:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.calls: list[list[Any]] = []
+
+    def invoke(self, messages: list[Any]) -> Any:
+        self.calls.append(messages)
+        response = (
+            self.response.pop(0)
+            if isinstance(self.response, list)
+            else self.response
+        )
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+class FakeChatModel:
+    def __init__(self, response: Any) -> None:
+        self.response = response
+        self.bound_models: list[tuple[type, str]] = []
+        self.structured_models: list[FakeStructuredModel] = []
+
+    def with_structured_output(self, model: type, *, method: str) -> FakeStructuredModel:
+        self.bound_models.append((model, method))
+        structured = FakeStructuredModel(self.response)
+        self.structured_models.append(structured)
+        return structured
+
+
+def research_task(*, dependencies: list[str] | None = None) -> TaskSpec:
+    return TaskSpec(
+        task_id="research_langgraph",
+        title="调研 LangGraph",
+        description="总结 LangGraph 的核心概念",
+        task_type="research",
+        dependencies=dependencies or [],
+        assigned_agent_id="langgraph_researcher",
+        output_contract="research_result_v1",
+    )
+
+
+def research_spec() -> ResolvedSubAgentSpec:
+    return ResolvedSubAgentSpec(
+        agent_id="langgraph_researcher",
+        task_id="research_langgraph",
+        role="LangGraph 调研员",
+        objective="从授权资料总结 LangGraph 核心概念",
+        instructions=["区分官方事实和推断", "返回结构化结论"],
+        required_capabilities=["web_research"],
+        requested_tools=["web_search", "web_page_reader"],
+        granted_tools=["web_search"],
+        knowledge_scope=["LangGraph", "StateGraph"],
+        output_contract="research_result_v1",
+        timeout_seconds=60,
+        max_steps=4,
+        token_budget=2000,
+    )
+
+
+def completed_dependency(task_id: str) -> WorkerResult:
+    return WorkerResult(
+        run_id="run-5",
+        task_id=task_id,
+        agent_id=f"{task_id}_agent",
+        status="completed",
+        output_contract="research_result_v1",
+        output={
+            "summary": f"{task_id} summary",
+            "findings": [f"{task_id} finding"],
+            "sources": [],
+        },
+        execution_time_ms=10,
+        token_usage=20,
+    )
+
+
+def runtime_context() -> RuntimeContext:
+    return RuntimeContext(
+        run_id="run-5",
+        relevant_memory=[
+            MemoryItem(
+                memory_id="m1",
+                content="用户希望保留英文术语。",
+                scope=["LangGraph"],
+            )
+        ],
+    )
+
+
+def successful_response() -> ResearchResult:
+    return ResearchResult(
+        summary="LangGraph 使用图来组织有状态工作流。",
+        findings=["StateGraph 负责定义节点、边和共享状态。"],
+        sources=[],
+    )
+
+
+def test_worker_prompt_contains_only_bounded_context_and_granted_tools() -> None:
+    chat_model = FakeChatModel(successful_response())
+    worker = WorkerFactory(chat_model).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        runtime_context(),
+    )
+
+    system_message, human_message = worker.build_messages()
+    combined = f"{system_message.content}\n{human_message.content}"
+
+    assert "LangGraph 调研员" in combined
+    assert "调研 LangGraph" in combined
+    assert "web_search" in combined
+    assert "web_page_reader" not in combined
+    assert "用户希望保留英文术语" in combined
+    assert "research_result_v1" in combined
+    assert '"additionalProperties": false' in combined
+    assert "API Key" not in combined
+    assert "整段主会话" not in combined
+
+
+def test_runtime_context_rejects_conversation_and_credentials() -> None:
+    with pytest.raises(ValidationError):
+        RuntimeContext(
+            run_id="run-5",
+            relevant_memory=[],
+            messages=["private conversation"],
+            api_key="secret",
+        )
+
+
+def test_worker_receives_exact_completed_dependency_results() -> None:
+    task = research_task(dependencies=["source_task"])
+    dependency = completed_dependency("source_task")
+    worker = WorkerFactory(FakeChatModel(successful_response())).create_worker(
+        task,
+        research_spec(),
+        [dependency],
+        runtime_context(),
+    )
+
+    human_payload = worker.build_messages()[1].content
+    assert "source_task summary" in human_payload
+    assert '"agent_id"' not in human_payload
+    assert '"token_usage"' not in human_payload
+
+
+def test_worker_rejects_missing_or_unrelated_dependency_context() -> None:
+    task = research_task(dependencies=["source_task"])
+    factory = WorkerFactory(FakeChatModel(successful_response()))
+
+    with pytest.raises(WorkerContextError, match="missing: source_task"):
+        factory.create_worker(task, research_spec(), [], runtime_context())
+
+    with pytest.raises(WorkerContextError, match="unrelated: other_task"):
+        factory.create_worker(
+            task,
+            research_spec(),
+            [completed_dependency("source_task"), completed_dependency("other_task")],
+            runtime_context(),
+        )
+
+
+def test_worker_rejects_task_agent_mismatch() -> None:
+    task = research_task().model_copy(update={"assigned_agent_id": "other_agent"})
+
+    with pytest.raises(WorkerContextError, match="assigned to other_agent"):
+        WorkerFactory(FakeChatModel(successful_response())).create_worker(
+            task,
+            research_spec(),
+            [],
+            runtime_context(),
+        )
+
+
+def test_worker_executes_once_validates_output_and_releases_context() -> None:
+    chat_model = FakeChatModel(successful_response())
+    worker = WorkerFactory(chat_model).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        runtime_context(),
+    )
+
+    result = worker.execute()
+
+    assert result.status == "completed"
+    assert result.output["summary"].startswith("LangGraph")
+    assert result.task_id == "research_langgraph"
+    assert result.agent_id == "langgraph_researcher"
+    assert result.tool_calls == []
+    assert worker.released is True
+    with pytest.raises(WorkerLifecycleError, match="cannot be reused"):
+        worker.execute()
+    with pytest.raises(WorkerLifecycleError, match="released"):
+        worker.build_messages()
+
+
+def test_factory_creates_a_fresh_worker_and_model_binding_each_time() -> None:
+    chat_model = FakeChatModel(successful_response())
+    factory = WorkerFactory(chat_model)
+
+    first = factory.create_worker(
+        research_task(), research_spec(), [], runtime_context()
+    )
+    second = factory.create_worker(
+        research_task(), research_spec(), [], runtime_context()
+    )
+
+    assert first is not second
+    assert len(chat_model.structured_models) == 2
+    assert all(model is ResearchResult for model, _ in chat_model.bound_models)
+
+
+def test_invalid_structured_output_is_retried_then_becomes_auditable_failure() -> None:
+    chat_model = FakeChatModel(
+        {"summary": "缺少 findings 和 sources，不能通过输出协议"}
+    )
+    worker = WorkerFactory(chat_model).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        runtime_context(),
+    )
+
+    result = worker.execute()
+
+    assert result.status == "invalid_output"
+    assert result.output is None
+    assert "research_result_v1" in result.error
+    assert "after two attempts" in result.error
+    assert len(chat_model.structured_models[0].calls) == 2
+    assert "remove all fields" in str(
+        chat_model.structured_models[0].calls[1][-1].content
+    )
+    assert worker.released is True
+
+
+def test_worker_recovers_when_second_structured_output_is_valid() -> None:
+    chat_model = FakeChatModel(
+        [
+            {"summary": "first response omitted required findings"},
+            successful_response(),
+        ]
+    )
+    worker = WorkerFactory(chat_model).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        runtime_context(),
+    )
+
+    result = worker.execute()
+
+    assert result.status == "completed"
+    assert result.output["findings"]
+    assert len(chat_model.structured_models[0].calls) == 2
+    assert worker.released is True
+
+
+def test_timeout_becomes_timeout_result_and_releases_context() -> None:
+    worker = WorkerFactory(FakeChatModel(TimeoutError("provider timed out"))).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        runtime_context(),
+    )
+
+    result = worker.execute()
+
+    assert result.status == "timeout"
+    assert result.error == "provider timed out"
+    assert worker.released is True
+
+
+def test_prompt_is_valid_json_after_the_instruction_prefix() -> None:
+    worker = WorkerFactory(FakeChatModel(successful_response())).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        runtime_context(),
+    )
+    human_content = str(worker.build_messages()[1].content)
+    payload = json.loads(human_content[human_content.index("{") :])
+
+    assert payload["task"]["task_id"] == "research_langgraph"
+    assert [item["memory_id"] for item in payload["relevant_memory"]] == ["m1"]

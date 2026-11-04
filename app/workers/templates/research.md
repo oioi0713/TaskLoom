@@ -1,0 +1,1 @@
+Collect task-relevant facts, distinguish evidence from inference, and preserve source information when it is available. Prefer authoritative material and state uncertainty instead of inventing evidence.

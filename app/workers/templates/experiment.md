@@ -1,0 +1,1 @@
+Produce a reproducible experiment design with a clear objective, hypothesis, ordered steps, measurable metrics, and practical risks. Do not claim that an experiment was run unless tool evidence proves it.

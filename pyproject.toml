@@ -26,6 +26,7 @@ dev = [
 [project.scripts]
 taskloom = "app.main:main"
 taskloom-plan = "app.agents.planner_cli:main"
+taskloom-worker = "app.workers.worker_cli:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
