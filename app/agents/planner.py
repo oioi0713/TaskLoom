@@ -21,6 +21,7 @@ from app.contracts.subagent import SubAgentSpec
 from app.contracts.task import TaskSpec
 from app.graph.state import Stage3State, WorkflowEvent
 from app.llm.factory import create_chat_model
+from app.observability import LLMTraceRecorder
 from app.planning.validator import PlanGuard
 from app.policies.capability_registry import CAPABILITY_REGISTRY, CAPABILITY_TOOL_MAP
 from app.tools.registry import TOOL_REGISTRY
@@ -88,9 +89,15 @@ class PlannerAgent:
         structured_model: Any,
         *,
         guard: PlanGuard | None = None,
+        trace_recorder: LLMTraceRecorder | None = None,
+        model_name: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> None:
         self._structured_model = structured_model
         self._guard = guard or PlanGuard()
+        self._trace_recorder = trace_recorder
+        self._model_name = model_name
+        self._max_output_tokens = max_output_tokens
 
     @classmethod
     def from_chat_model(
@@ -99,14 +106,24 @@ class PlannerAgent:
         *,
         structured_output_method: str = "function_calling",
         guard: PlanGuard | None = None,
+        trace_recorder: LLMTraceRecorder | None = None,
+        model_name: str | None = None,
+        max_output_tokens: int | None = None,
     ) -> "PlannerAgent":
         """Bind a chat model to the ExecutionPlan Pydantic response schema."""
 
         structured_model = chat_model.with_structured_output(
             ExecutionPlan,
             method=structured_output_method,
+            include_raw=True,
         )
-        return cls(structured_model, guard=guard)
+        return cls(
+            structured_model,
+            guard=guard,
+            trace_recorder=trace_recorder,
+            model_name=model_name,
+            max_output_tokens=max_output_tokens,
+        )
 
     def plan(self, planner_input: PlannerInput) -> ExecutionPlan:
         """Generate at most two plans and return only a guarded executable plan."""
@@ -114,9 +131,22 @@ class PlannerAgent:
         messages = build_planner_messages(planner_input)
         last_feedback: list[str] = []
         for attempt in (1, 2):
+            call_id = (
+                self._trace_recorder.record_request(
+                    component="planner",
+                    messages=list(messages),
+                    attempt=attempt,
+                    model=self._model_name,
+                    max_tokens=self._max_output_tokens,
+                )
+                if self._trace_recorder is not None
+                else None
+            )
             try:
                 raw_plan = self._structured_model.invoke(messages)
             except (ValidationError, OutputParserException, ValueError) as exc:
+                if self._trace_recorder is not None and call_id is not None:
+                    self._trace_recorder.record_error(call_id, exc)
                 last_feedback = [f"Structured output validation failed: {exc}"]
                 if attempt == 2:
                     raise PlanGenerationError(last_feedback) from exc
@@ -130,8 +160,37 @@ class PlannerAgent:
                     )
                 )
                 continue
+            except Exception as exc:
+                if self._trace_recorder is not None and call_id is not None:
+                    self._trace_recorder.record_error(call_id, exc)
+                raise
 
-            payload = self._normalize_model_output(raw_plan)
+            if self._trace_recorder is not None and call_id is not None:
+                self._trace_recorder.record_response(call_id, raw_plan)
+
+            try:
+                payload = self._normalize_model_output(raw_plan)
+            except (
+                ValidationError,
+                OutputParserException,
+                TypeError,
+                ValueError,
+            ) as exc:
+                if self._trace_recorder is not None and call_id is not None:
+                    self._trace_recorder.record_validation_error(call_id, exc)
+                last_feedback = [f"Structured output validation failed: {exc}"]
+                if attempt == 2:
+                    raise PlanGenerationError(last_feedback) from exc
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "Your previous response did not match the ExecutionPlan "
+                            "schema. Correct it and return a complete structured plan. "
+                            + last_feedback[0]
+                        )
+                    )
+                )
+                continue
             payload["budget"] = self._system_budget(planner_input).model_dump(
                 mode="python"
             )
@@ -169,6 +228,16 @@ class PlannerAgent:
 
     @staticmethod
     def _normalize_model_output(raw_plan: Any) -> dict[str, Any]:
+        if (
+            isinstance(raw_plan, dict)
+            and {"raw", "parsed", "parsing_error"}.issubset(raw_plan)
+        ):
+            parsing_error = raw_plan["parsing_error"]
+            if parsing_error is not None:
+                if isinstance(parsing_error, BaseException):
+                    raise parsing_error
+                raise ValueError(str(parsing_error))
+            raw_plan = raw_plan["parsed"]
         if isinstance(raw_plan, ExecutionPlan):
             return raw_plan.model_dump(mode="python")
         if isinstance(raw_plan, dict):
@@ -237,7 +306,11 @@ class PlannerAgent:
         return feedback
 
 
-def create_planner_agent(settings: Settings | None = None) -> PlannerAgent:
+def create_planner_agent(
+    settings: Settings | None = None,
+    *,
+    trace_recorder: LLMTraceRecorder | None = None,
+) -> PlannerAgent:
     """Create the production Planner without making an API request."""
 
     resolved = settings or get_settings()
@@ -245,6 +318,9 @@ def create_planner_agent(settings: Settings | None = None) -> PlannerAgent:
     return PlannerAgent.from_chat_model(
         chat_model,
         structured_output_method=resolved.llm_structured_output_method,
+        trace_recorder=trace_recorder,
+        model_name=resolved.llm_model,
+        max_output_tokens=resolved.llm_planner_max_output_tokens,
     )
 
 

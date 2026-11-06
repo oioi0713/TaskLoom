@@ -24,7 +24,9 @@ class FakeWorker:
         )
 
 
-def test_worker_cli_prints_result_and_release_state(monkeypatch, capsys) -> None:
+def test_worker_cli_prints_result_and_release_state(
+    monkeypatch, capsys, tmp_path
+) -> None:
     captured = {}
 
     def fake_create_worker(**kwargs):
@@ -33,7 +35,9 @@ def test_worker_cli_prints_result_and_release_state(monkeypatch, capsys) -> None
 
     monkeypatch.setattr("app.workers.worker_cli.create_worker", fake_create_worker)
 
-    exit_code = main(["--task", "生成一份测试报告"])
+    exit_code = main(
+        ["--task", "生成一份测试报告", "--log-dir", str(tmp_path)]
+    )
     output = capsys.readouterr().out
 
     assert exit_code == 0

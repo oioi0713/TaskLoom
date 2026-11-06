@@ -155,7 +155,7 @@ def test_second_permission_invalid_attempt_is_safely_degraded(plan_data: dict) -
     assert agent.can_delegate is False
     assert agent.timeout_seconds == 120
     assert agent.max_steps == 8
-    assert agent.token_budget == 8000
+    assert agent.token_budget == 8192
 
 
 def test_invalid_json_is_rejected() -> None:

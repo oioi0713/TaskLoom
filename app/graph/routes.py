@@ -4,7 +4,7 @@ from typing import Literal
 
 from langgraph.types import Send
 
-from app.graph.state import Stage3State
+from app.graph.state import Stage3State, Stage6State
 
 
 def route_after_validation(
@@ -45,6 +45,53 @@ def route_supervisor(
                     "task": task,
                     "spec": specs_by_task_id[task_id],
                     "dependency_results": dependency_results,
+                },
+            )
+        )
+    return sends
+
+
+def route_runtime_supervisor(
+    state: Stage6State,
+) -> list[Send] | Literal["reviewer"]:
+    """Send resolved, isolated task inputs to the real Worker Factory node."""
+
+    ready_task_ids = state.get("ready_task_ids", [])
+    if not ready_task_ids:
+        return "reviewer"
+
+    tasks_by_id = {task.task_id: task for task in state["tasks"]}
+    specs_by_task_id = {
+        spec.task_id: spec for spec in state["resolved_agent_specs"]
+    }
+    latest_results = {
+        result.task_id: result for result in state.get("worker_results", [])
+    }
+    sends: list[Send] = []
+    for task_id in ready_task_ids:
+        task = tasks_by_id[task_id]
+        spec = specs_by_task_id[task_id]
+        knowledge_scope = {item.casefold() for item in spec.knowledge_scope}
+        relevant_memory = [
+            item
+            for item in state.get("memory_context", [])
+            if not item.scope
+            or knowledge_scope.intersection(
+                scope.casefold() for scope in item.scope
+            )
+        ]
+        sends.append(
+            Send(
+                "worker",
+                {
+                    "run_id": state["run_id"],
+                    "task": task,
+                    "spec": spec,
+                    "dependency_results": [
+                        latest_results[dependency]
+                        for dependency in task.dependencies
+                    ],
+                    "relevant_memory": relevant_memory,
                 },
             )
         )

@@ -42,3 +42,5 @@ def test_configured_factory_creates_provider_without_api_request() -> None:
 
     assert model.model_name == "test-model"
     assert str(model.openai_api_base).rstrip("/") == "https://example.invalid/v1"
+    assert model.max_retries == 0
+    assert model.max_tokens == 4096

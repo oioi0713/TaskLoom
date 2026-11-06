@@ -10,7 +10,7 @@ from app.contracts.memory import MemoryItem
 from app.contracts.plan import ExecutionPlan
 from app.contracts.result import WorkerResult
 from app.contracts.review import ReviewerDecision
-from app.contracts.subagent import SubAgentSpec
+from app.contracts.subagent import ResolvedSubAgentSpec, SubAgentSpec
 from app.contracts.task import TaskSpec
 from app.contracts.types import NonEmptyStr
 
@@ -56,6 +56,16 @@ class Stage3State(AgentState):
     workflow_status: Literal["created", "running", "completed", "failed"]
 
 
+class Stage6State(AgentState):
+    """State for the real Planner-to-Worker runtime workflow."""
+
+    execution_plan: ExecutionPlan | None
+    resolved_agent_specs: list[ResolvedSubAgentSpec]
+    user_allowed_tools: list[str]
+    enabled_tools: list[str]
+    workflow_status: Literal["created", "running", "completed", "failed"]
+
+
 class WorkerInput(TypedDict):
     """Isolated input sent to one short-lived mock worker invocation."""
 
@@ -63,3 +73,13 @@ class WorkerInput(TypedDict):
     task: TaskSpec
     spec: SubAgentSpec
     dependency_results: list[WorkerResult]
+
+
+class RuntimeWorkerInput(TypedDict):
+    """Minimal input sent to one real short-lived Worker invocation."""
+
+    run_id: str
+    task: TaskSpec
+    spec: ResolvedSubAgentSpec
+    dependency_results: list[WorkerResult]
+    relevant_memory: list[MemoryItem]

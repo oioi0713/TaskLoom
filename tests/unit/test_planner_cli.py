@@ -6,12 +6,15 @@ from langchain_core.exceptions import LangChainException
 def test_planner_cli_reports_missing_configuration(
     monkeypatch,
     capsys,
+    tmp_path,
 ) -> None:
     monkeypatch.setenv("TASKLOOM_LLM_MODEL", "")
     monkeypatch.setenv("TASKLOOM_LLM_API_KEY", "")
     get_settings.cache_clear()
     try:
-        exit_code = main(["--goal", "调研 Agent Memory"])
+        exit_code = main(
+            ["--goal", "调研 Agent Memory", "--log-dir", str(tmp_path)]
+        )
     finally:
         get_settings.cache_clear()
 
@@ -24,6 +27,7 @@ def test_planner_cli_reports_missing_configuration(
 def test_planner_cli_reports_provider_error_without_traceback(
     monkeypatch,
     capsys,
+    tmp_path,
 ) -> None:
     class FailingPlanner:
         def plan(self, planner_input):
@@ -31,10 +35,12 @@ def test_planner_cli_reports_provider_error_without_traceback(
 
     monkeypatch.setattr(
         "app.agents.planner_cli.create_planner_agent",
-        lambda: FailingPlanner(),
+        lambda *args, **kwargs: FailingPlanner(),
     )
 
-    exit_code = main(["--goal", "调研 Agent Memory"])
+    exit_code = main(
+        ["--goal", "调研 Agent Memory", "--log-dir", str(tmp_path)]
+    )
 
     captured = capsys.readouterr()
     assert exit_code == 3

@@ -17,15 +17,18 @@ from app.workers.factory import (
     WorkerFactory,
     WorkerLifecycleError,
 )
+from app.observability import LLMTraceRecorder
 
 
 class FakeStructuredModel:
     def __init__(self, response: Any) -> None:
         self.response = response
         self.calls: list[list[Any]] = []
+        self.call_kwargs: list[dict[str, Any]] = []
 
-    def invoke(self, messages: list[Any]) -> Any:
+    def invoke(self, messages: list[Any], **kwargs: Any) -> Any:
         self.calls.append(messages)
+        self.call_kwargs.append(kwargs)
         response = (
             self.response.pop(0)
             if isinstance(self.response, list)
@@ -40,10 +43,19 @@ class FakeChatModel:
     def __init__(self, response: Any) -> None:
         self.response = response
         self.bound_models: list[tuple[type, str]] = []
+        self.bound_kwargs: list[dict[str, Any]] = []
         self.structured_models: list[FakeStructuredModel] = []
 
-    def with_structured_output(self, model: type, *, method: str) -> FakeStructuredModel:
+    def with_structured_output(
+        self,
+        model: type,
+        *,
+        method: str,
+        include_raw: bool = False,
+        **kwargs: Any,
+    ) -> FakeStructuredModel:
         self.bound_models.append((model, method))
+        self.bound_kwargs.append(kwargs)
         structured = FakeStructuredModel(self.response)
         self.structured_models.append(structured)
         return structured
@@ -210,6 +222,8 @@ def test_worker_executes_once_validates_output_and_releases_context() -> None:
     assert result.task_id == "research_langgraph"
     assert result.agent_id == "langgraph_researcher"
     assert result.tool_calls == []
+    assert chat_model.structured_models[0].call_kwargs == [{}]
+    assert chat_model.bound_kwargs == [{"max_tokens": 2000}]
     assert worker.released is True
     with pytest.raises(WorkerLifecycleError, match="cannot be reused"):
         worker.execute()
@@ -231,6 +245,24 @@ def test_factory_creates_a_fresh_worker_and_model_binding_each_time() -> None:
     assert first is not second
     assert len(chat_model.structured_models) == 2
     assert all(model is ResearchResult for model, _ in chat_model.bound_models)
+
+
+def test_factory_clamps_worker_output_tokens_below_spec_budget() -> None:
+    chat_model = FakeChatModel(successful_response())
+    worker = WorkerFactory(chat_model, max_output_tokens=512).create_worker(
+        research_task(), research_spec(), [], runtime_context()
+    )
+
+    result = worker.execute()
+
+    assert result.status == "completed"
+    assert chat_model.structured_models[0].call_kwargs == [{}]
+    assert chat_model.bound_kwargs == [{"max_tokens": 512}]
+
+
+def test_factory_rejects_non_positive_output_limit() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        WorkerFactory(FakeChatModel(successful_response()), max_output_tokens=0)
 
 
 def test_invalid_structured_output_is_retried_then_becomes_auditable_failure() -> None:
@@ -306,3 +338,27 @@ def test_prompt_is_valid_json_after_the_instruction_prefix() -> None:
 
     assert payload["task"]["task_id"] == "research_langgraph"
     assert [item["memory_id"] for item in payload["relevant_memory"]] == ["m1"]
+
+
+def test_worker_records_prompt_response_and_identity(tmp_path) -> None:
+    recorder = LLMTraceRecorder(tmp_path / "trace", run_id="run-5")
+    worker = WorkerFactory(
+        FakeChatModel(successful_response()),
+        trace_recorder=recorder,
+        model_name="test-model",
+    ).create_worker(research_task(), research_spec(), [], runtime_context())
+
+    result = worker.execute()
+
+    events = [
+        json.loads(line)
+        for line in recorder.calls_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert result.status == "completed"
+    assert [event["event"] for event in events] == [
+        "llm.request",
+        "llm.response",
+    ]
+    assert events[0]["task_id"] == "research_langgraph"
+    assert events[0]["agent_id"] == "langgraph_researcher"
+    assert events[0]["call_id"] == events[1]["call_id"]

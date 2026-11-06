@@ -1,4 +1,5 @@
 import copy
+import json
 
 import pytest
 
@@ -13,6 +14,7 @@ from app.contracts.subagent import SubAgentSpec
 from app.contracts.task import TaskSpec
 from app.policies.capability_registry import CAPABILITY_REGISTRY
 from app.contracts.output_registry import OUTPUT_CONTRACTS
+from app.observability import LLMTraceRecorder
 
 
 class SequentialStructuredModel:
@@ -253,3 +255,34 @@ def test_planner_rejects_capability_outside_input_scope() -> None:
 
     with pytest.raises(PlanGenerationError, match="not supplied in PlannerInput"):
         PlannerAgent(model).plan(restricted_input)
+
+
+def test_planner_records_prompt_and_structured_response(tmp_path) -> None:
+    generated = one_task_plan(
+        goal="技术调研",
+        capability="technical_analysis",
+        requested_tools=[],
+        output_contract="research_result_v1",
+    )
+    recorder = LLMTraceRecorder(tmp_path / "trace", run_id="planner-run")
+
+    plan = PlannerAgent(
+        SequentialStructuredModel([generated]),
+        trace_recorder=recorder,
+        model_name="test-model",
+        max_output_tokens=1024,
+    ).plan(planner_input("技术调研"))
+
+    events = [
+        json.loads(line)
+        for line in recorder.calls_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert plan.goal_summary == "技术调研"
+    assert [event["event"] for event in events] == [
+        "llm.request",
+        "llm.response",
+    ]
+    assert events[0]["call_id"] == events[1]["call_id"]
+    assert events[0]["messages"][1]["role"] == "human"
+    assert events[0]["model"] == "test-model"
+    assert events[1]["response"]["goal_summary"] == "技术调研"

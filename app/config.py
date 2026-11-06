@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     llm_timeout_seconds: int = Field(default=60, ge=1, le=300)
+    llm_max_retries: int = Field(default=0, ge=0, le=2)
+    llm_planner_max_output_tokens: int = Field(default=4096, ge=256, le=8192)
+    llm_worker_max_output_tokens: int = Field(default=8192, ge=128, le=8192)
     llm_structured_output_method: Literal["function_calling", "json_schema"] = (
         "function_calling"
     )

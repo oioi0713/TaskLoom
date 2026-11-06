@@ -27,7 +27,7 @@ class SubAgentSpec(BaseModel):
     output_contract: OutputContractName
     timeout_seconds: int = Field(default=120, ge=1, le=120)
     max_steps: int = Field(default=8, ge=1, le=8)
-    token_budget: int = Field(default=8000, ge=1, le=8000)
+    token_budget: int = Field(default=8192, ge=1, le=8192)
     can_delegate: Literal[False] = False
 
     @field_validator("required_capabilities")

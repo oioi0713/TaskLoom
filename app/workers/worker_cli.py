@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
+from uuid import uuid4
 
 from app.contracts.subagent import ResolvedSubAgentSpec
 from app.contracts.task import TaskSpec
 from app.llm.factory import MissingLLMConfigurationError
+from app.config import get_settings
+from app.observability import LLMTraceRecorder, default_run_log_dir
 from app.workers.context import RuntimeContext
 from app.workers.factory import create_worker
 
@@ -23,11 +27,27 @@ def build_parser() -> argparse.ArgumentParser:
         default="技术报告撰写员",
         help="Dynamic role assigned to the Worker.",
     )
+    parser.add_argument("--log-dir", type=Path, default=None)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    run_id = str(uuid4())
+    recorder = LLMTraceRecorder(
+        args.log_dir or default_run_log_dir(run_id),
+        run_id=run_id,
+    )
+    settings = get_settings()
+    recorder.write_run_metadata(
+        {
+            "status": "running",
+            "entrypoint": "worker_cli",
+            "task": args.task,
+            "role": args.role,
+            "model": settings.llm_model,
+        }
+    )
     task = TaskSpec(
         task_id="worker_demo",
         title="阶段 5 真实 Worker 演示",
@@ -62,17 +82,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             spec=spec,
             dependency_results=[],
             runtime_context=RuntimeContext(
-                run_id="stage5-worker-demo",
+                run_id=run_id,
                 relevant_memory=[],
             ),
+            settings=settings,
+            trace_recorder=recorder,
         )
     except MissingLLMConfigurationError as exc:
+        recorder.update_run_metadata({"status": "failed", "error": str(exc)})
         print(str(exc), file=sys.stderr)
         return 2
 
     result = worker.execute()
+    recorder.write_result(result.model_dump(mode="json"))
+    recorder.update_run_metadata(
+        {
+            "status": result.status,
+            "llm_call_count": recorder.call_count,
+            "result_file": str(recorder.result_path),
+        }
+    )
     print(result.model_dump_json(indent=2))
     print(f"CONTEXT_RELEASED={worker.released}")
+    print(f"日志目录：{recorder.run_dir}", file=sys.stderr)
     return 0 if result.status == "completed" else 1
 
 

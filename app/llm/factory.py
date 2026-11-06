@@ -34,7 +34,8 @@ def create_chat_model(settings: Settings | None = None) -> Any:
         "api_key": resolved.llm_api_key.get_secret_value(),
         "temperature": resolved.llm_temperature,
         "timeout": resolved.llm_timeout_seconds,
-        "max_retries": 2,
+        "max_retries": resolved.llm_max_retries,
+        "max_tokens": resolved.llm_planner_max_output_tokens,
     }
     if resolved.llm_base_url:
         kwargs["base_url"] = resolved.llm_base_url

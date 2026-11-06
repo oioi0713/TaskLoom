@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ from app.contracts.result import WorkerResult
 from app.contracts.subagent import ResolvedSubAgentSpec
 from app.contracts.task import TaskSpec
 from app.llm.factory import create_chat_model
+from app.observability import LLMTraceRecorder
+from app.progress import run_with_heartbeat
 from app.tools.registry import TOOL_REGISTRY
 from app.workers.context import (
     GrantedToolContext,
@@ -214,10 +217,16 @@ class IsolatedWorker:
         *,
         structured_model: Any,
         context: WorkerExecutionContext,
+        max_output_tokens: int,
+        trace_recorder: LLMTraceRecorder | None = None,
+        model_name: str | None = None,
     ) -> None:
         self._structured_model = structured_model
         self._context: WorkerExecutionContext | None = context
         self._messages: tuple[BaseMessage, ...] | None = _build_messages(context)
+        self._max_output_tokens = max_output_tokens
+        self._trace_recorder = trace_recorder
+        self._model_name = model_name
         self._released = False
 
     @property
@@ -231,7 +240,11 @@ class IsolatedWorker:
             raise WorkerLifecycleError("Worker context has already been released.")
         return tuple(self._messages)
 
-    def execute(self) -> WorkerResult:
+    def execute(
+        self,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> WorkerResult:
         """Invoke once, validate output, return an audit envelope, then release."""
 
         if self._released or self._context is None or self._messages is None:
@@ -243,8 +256,36 @@ class IsolatedWorker:
         try:
             attempt_messages = list(messages)
             for attempt in (1, 2):
+                if progress is not None:
+                    progress(f"正在调用 LLM，结构化输出尝试 {attempt}/2")
+                call_id = (
+                    self._trace_recorder.record_request(
+                        component="worker",
+                        messages=list(attempt_messages),
+                        attempt=attempt,
+                        model=self._model_name,
+                        task_id=context.task.task_id,
+                        agent_id=context.spec.agent_id,
+                        max_tokens=self._max_output_tokens,
+                    )
+                    if self._trace_recorder is not None
+                    else None
+                )
+                response_recorded = False
                 try:
-                    raw_output = self._structured_model.invoke(attempt_messages)
+                    try:
+                        raw_output = run_with_heartbeat(
+                            lambda: self._structured_model.invoke(attempt_messages),
+                            progress=progress,
+                            label="LLM 请求",
+                        )
+                    except Exception as exc:
+                        if self._trace_recorder is not None and call_id is not None:
+                            self._trace_recorder.record_error(call_id, exc)
+                        raise
+                    if self._trace_recorder is not None and call_id is not None:
+                        self._trace_recorder.record_response(call_id, raw_output)
+                        response_recorded = True
                     payload = self._normalize_output(raw_output)
                     validated = validate_output(
                         context.spec.output_contract,
@@ -253,6 +294,8 @@ class IsolatedWorker:
                     output = validated.model_dump(mode="json")
                     status = "completed"
                     error = None
+                    if progress is not None:
+                        progress("结构化输出校验通过")
                     break
                 except (
                     ValidationError,
@@ -260,7 +303,17 @@ class IsolatedWorker:
                     TypeError,
                     ValueError,
                 ) as exc:
+                    if (
+                        response_recorded
+                        and self._trace_recorder is not None
+                        and call_id is not None
+                    ):
+                        self._trace_recorder.record_validation_error(call_id, exc)
                     if attempt == 1:
+                        if progress is not None:
+                            progress(
+                                "第一次结构化输出不合法，正在反馈错误并重试"
+                            )
                         attempt_messages.append(
                             HumanMessage(
                                 content=(
@@ -279,15 +332,21 @@ class IsolatedWorker:
                         "Worker output failed "
                         f"{context.spec.output_contract} after two attempts: {exc}"
                     )
+                    if progress is not None:
+                        progress("第二次结构化输出仍不合法")
                     break
         except TimeoutError as exc:
             output = None
             status = "timeout"
             error = str(exc) or "Worker model request timed out."
+            if progress is not None:
+                progress("LLM 请求超时")
         except Exception as exc:  # Provider failures become an auditable WorkerResult.
             output = None
             status = "failed"
             error = f"Worker execution failed ({type(exc).__name__}): {exc}"
+            if progress is not None:
+                progress(f"Worker 调用失败：{type(exc).__name__}")
         finally:
             elapsed_ms = max(0, int((time.perf_counter() - started) * 1000))
             self._context = None
@@ -311,6 +370,16 @@ class IsolatedWorker:
 
     @staticmethod
     def _normalize_output(raw_output: Any) -> dict[str, Any]:
+        if (
+            isinstance(raw_output, dict)
+            and {"raw", "parsed", "parsing_error"}.issubset(raw_output)
+        ):
+            parsing_error = raw_output["parsing_error"]
+            if parsing_error is not None:
+                if isinstance(parsing_error, BaseException):
+                    raise parsing_error
+                raise ValueError(str(parsing_error))
+            raw_output = raw_output["parsed"]
         if isinstance(raw_output, BaseModel):
             return raw_output.model_dump(mode="python")
         if isinstance(raw_output, dict):
@@ -326,9 +395,17 @@ class WorkerFactory:
         chat_model: Any,
         *,
         structured_output_method: str = "function_calling",
+        max_output_tokens: int = 2048,
+        trace_recorder: LLMTraceRecorder | None = None,
+        model_name: str | None = None,
     ) -> None:
+        if max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be positive")
         self._chat_model = chat_model
         self._structured_output_method = structured_output_method
+        self._max_output_tokens = max_output_tokens
+        self._trace_recorder = trace_recorder
+        self._model_name = model_name
 
     def create_worker(
         self,
@@ -341,11 +418,20 @@ class WorkerFactory:
 
         context = _build_context(task, spec, dependency_results, runtime_context)
         output_model = OUTPUT_CONTRACTS[spec.output_contract]
+        max_output_tokens = min(spec.token_budget, self._max_output_tokens)
         structured_model = self._chat_model.with_structured_output(
             output_model,
             method=self._structured_output_method,
+            include_raw=True,
+            max_tokens=max_output_tokens,
         )
-        return IsolatedWorker(structured_model=structured_model, context=context)
+        return IsolatedWorker(
+            structured_model=structured_model,
+            context=context,
+            max_output_tokens=max_output_tokens,
+            trace_recorder=self._trace_recorder,
+            model_name=self._model_name,
+        )
 
 
 def create_worker(
@@ -355,6 +441,7 @@ def create_worker(
     runtime_context: RuntimeContext,
     *,
     settings: Settings | None = None,
+    trace_recorder: LLMTraceRecorder | None = None,
 ) -> IsolatedWorker:
     """Create one production Worker with the configured chat model."""
 
@@ -362,5 +449,8 @@ def create_worker(
     factory = WorkerFactory(
         create_chat_model(resolved),
         structured_output_method=resolved.llm_structured_output_method,
+        max_output_tokens=resolved.llm_worker_max_output_tokens,
+        trace_recorder=trace_recorder,
+        model_name=resolved.llm_model,
     )
     return factory.create_worker(task, spec, dependency_results, runtime_context)

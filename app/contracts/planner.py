@@ -18,7 +18,7 @@ class PlannerLimits(BaseModel):
     max_concurrency: int = Field(default=3, ge=1, le=3)
     max_timeout_seconds: int = Field(default=120, ge=1, le=120)
     max_steps_per_worker: int = Field(default=8, ge=1, le=8)
-    max_tokens_per_worker: int = Field(default=8000, ge=1, le=8000)
+    max_tokens_per_worker: int = Field(default=8192, ge=1, le=8192)
 
     @model_validator(mode="after")
     def concurrency_cannot_exceed_workers(self) -> "PlannerLimits":

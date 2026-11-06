@@ -400,7 +400,7 @@ class PlanGuard:
             agent["can_delegate"] = False
             self._clamp_integer(agent, "timeout_seconds", minimum=1, maximum=120)
             self._clamp_integer(agent, "max_steps", minimum=1, maximum=8)
-            self._clamp_integer(agent, "token_budget", minimum=1, maximum=8000)
+            self._clamp_integer(agent, "token_budget", minimum=1, maximum=8192)
         return raw_payload
 
     @staticmethod

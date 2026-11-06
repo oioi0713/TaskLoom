@@ -58,7 +58,7 @@
       "output_contract": "research_result_v1",
       "timeout_seconds": 120,
       "max_steps": 8,
-      "token_budget": 8000,
+      "token_budget": 8192,
       "can_delegate": false
     },
     {
@@ -80,7 +80,7 @@
       "output_contract": "report_result_v1",
       "timeout_seconds": 120,
       "max_steps": 8,
-      "token_budget": 8000,
+      "token_budget": 8192,
       "can_delegate": false
     }
   ],
@@ -92,7 +92,7 @@
     "max_replans": 2,
     "max_total_steps": 30,
     "max_worker_timeout_seconds": 120,
-    "max_worker_token_budget": 8000,
-    "total_token_budget": 64000
+    "max_worker_token_budget": 8192,
+    "total_token_budget": 65536
   }
 }

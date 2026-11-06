@@ -14,8 +14,8 @@ class ExecutionBudget(BaseModel):
     max_replans: int = Field(default=2, ge=0, le=2)
     max_total_steps: int = Field(default=30, ge=1, le=30)
     max_worker_timeout_seconds: int = Field(default=120, ge=1, le=120)
-    max_worker_token_budget: int = Field(default=8000, ge=1, le=8000)
-    total_token_budget: int = Field(default=64000, ge=1)
+    max_worker_token_budget: int = Field(default=8192, ge=1, le=8192)
+    total_token_budget: int = Field(default=65536, ge=1)
 
     @model_validator(mode="after")
     def concurrency_cannot_exceed_worker_limit(self) -> "ExecutionBudget":

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from app.contracts.result import WorkerResult
-from app.graph.state import WorkerInput, WorkflowEvent
+from app.graph.state import RuntimeWorkerInput, WorkerInput, WorkflowEvent
+from app.workers.context import RuntimeContext
+from app.workers.factory import WorkerFactory
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,3 +223,77 @@ class MockWorkerRuntime:
                 ],
             }
         raise ValueError(f"Unknown mock task: {task_id}")
+
+
+class WorkerFactoryRuntime:
+    """Adapt the stage-five Worker Factory to a LangGraph Worker node."""
+
+    def __init__(
+        self,
+        factory: WorkerFactory,
+        *,
+        progress: Callable[[str], None] | None = None,
+    ) -> None:
+        self.factory = factory
+        self.progress = progress
+
+    def execute(self, worker_input: RuntimeWorkerInput) -> dict:
+        """Create, run, and release one real isolated Worker."""
+
+        task = worker_input["task"]
+        spec = worker_input["spec"]
+        if self.progress is not None:
+            self.progress(
+                f"Worker {task.task_id} 已创建，角色={spec.role}，准备执行"
+            )
+        worker = self.factory.create_worker(
+            task=task,
+            spec=spec,
+            dependency_results=worker_input["dependency_results"],
+            runtime_context=RuntimeContext(
+                run_id=worker_input["run_id"],
+                relevant_memory=worker_input["relevant_memory"],
+            ),
+        )
+        result = worker.execute(
+            progress=(
+                (lambda message: self.progress(f"Worker {task.task_id}：{message}"))
+                if self.progress is not None
+                else None
+            )
+        )
+        if self.progress is not None:
+            self.progress(
+                f"Worker {task.task_id} 执行结束，status={result.status}，"
+                f"耗时={result.execution_time_ms}ms"
+            )
+        event_type = (
+            "worker.completed"
+            if result.status == "completed"
+            else "worker.failed"
+        )
+        return {
+            "worker_results": [result],
+            "events": [
+                WorkflowEvent(
+                    event_type="worker.created",
+                    message=f"Created isolated Worker for {task.task_id}.",
+                    data={
+                        "task_id": task.task_id,
+                        "agent_id": spec.agent_id,
+                        "granted_tools": spec.granted_tools,
+                    },
+                ),
+                WorkflowEvent(
+                    event_type=event_type,
+                    message=(
+                        f"Worker {task.task_id} finished with {result.status}."
+                    ),
+                    data={
+                        "task_id": task.task_id,
+                        "status": result.status,
+                        "context_released": worker.released,
+                    },
+                ),
+            ],
+        }
