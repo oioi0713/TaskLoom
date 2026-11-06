@@ -10,9 +10,7 @@ def supervisor_node(state: Stage3State) -> dict:
 
     tasks = state["tasks"]
     completed_ids = {
-        result.task_id
-        for result in state.get("worker_results", [])
-        if result.status == "completed"
+        task.task_id for task in tasks if task.status == "completed"
     }
     candidates = [
         task
@@ -110,9 +108,7 @@ def runtime_supervisor_node(state: Stage6State) -> dict:
         ]
 
     completed_ids = {
-        result.task_id
-        for result in state.get("worker_results", [])
-        if result.status == "completed"
+        task.task_id for task in tasks if task.status == "completed"
     }
     candidates = [
         task

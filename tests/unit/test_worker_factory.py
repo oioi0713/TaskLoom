@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 import pytest
+from langchain_core.messages import AIMessage
 from pydantic import ValidationError
 
 from app.contracts.memory import MemoryItem
@@ -150,6 +151,23 @@ def test_worker_prompt_contains_only_bounded_context_and_granted_tools() -> None
     assert '"additionalProperties": false' in combined
     assert "API Key" not in combined
     assert "整段主会话" not in combined
+
+
+def test_worker_prompt_contains_reviewer_retry_feedback() -> None:
+    worker = WorkerFactory(FakeChatModel(successful_response())).create_worker(
+        research_task(),
+        research_spec(),
+        [],
+        RuntimeContext(
+            run_id="run-5",
+            relevant_memory=[],
+            review_feedback=["补充官方证据并解释限制"],
+        ),
+    )
+
+    combined = "\n".join(str(message.content) for message in worker.build_messages())
+
+    assert "补充官方证据并解释限制" in combined
 
 
 def test_runtime_context_rejects_conversation_and_credentials() -> None:
@@ -362,3 +380,26 @@ def test_worker_records_prompt_response_and_identity(tmp_path) -> None:
     assert events[0]["task_id"] == "research_langgraph"
     assert events[0]["agent_id"] == "langgraph_researcher"
     assert events[0]["call_id"] == events[1]["call_id"]
+
+
+def test_worker_records_provider_token_usage_from_raw_response() -> None:
+    response = {
+        "raw": AIMessage(
+            content="",
+            usage_metadata={
+                "input_tokens": 120,
+                "output_tokens": 80,
+                "total_tokens": 200,
+            },
+        ),
+        "parsed": successful_response(),
+        "parsing_error": None,
+    }
+    worker = WorkerFactory(FakeChatModel(response)).create_worker(
+        research_task(), research_spec(), [], runtime_context()
+    )
+
+    result = worker.execute()
+
+    assert result.status == "completed"
+    assert result.token_usage == 200

@@ -138,6 +138,7 @@ def _build_context(
             _copy_model(item) for item in runtime_context.relevant_memory
         ),
         granted_tools=granted_tools,
+        review_feedback=runtime_context.review_feedback,
     )
 
 
@@ -199,6 +200,7 @@ def _build_messages(context: WorkerExecutionContext) -> tuple[BaseMessage, ...]:
         "task": context.task.model_dump(mode="json"),
         "dependency_results": dependency_payload,
         "relevant_memory": memory_payload,
+        "reviewer_retry_feedback": list(context.review_feedback),
     }
     human_prompt = (
         "Complete only the current task using the isolated context below. "
@@ -253,6 +255,7 @@ class IsolatedWorker:
         context = self._context
         messages = self._messages
         started = time.perf_counter()
+        token_usage = 0
         try:
             attempt_messages = list(messages)
             for attempt in (1, 2):
@@ -286,6 +289,7 @@ class IsolatedWorker:
                     if self._trace_recorder is not None and call_id is not None:
                         self._trace_recorder.record_response(call_id, raw_output)
                         response_recorded = True
+                    token_usage += self._extract_token_usage(raw_output)
                     payload = self._normalize_output(raw_output)
                     validated = validate_output(
                         context.spec.output_contract,
@@ -364,7 +368,7 @@ class IsolatedWorker:
             sources=(output or {}).get("sources", []),
             error=error,
             execution_time_ms=elapsed_ms,
-            token_usage=0,
+            token_usage=token_usage,
             tool_calls=[],
         )
 
@@ -385,6 +389,29 @@ class IsolatedWorker:
         if isinstance(raw_output, dict):
             return dict(raw_output)
         raise TypeError("Structured Worker output must be a Pydantic model or mapping.")
+
+    @staticmethod
+    def _extract_token_usage(raw_output: Any) -> int:
+        """Read total provider usage from an include_raw structured response."""
+
+        if not (
+            isinstance(raw_output, dict)
+            and {"raw", "parsed", "parsing_error"}.issubset(raw_output)
+        ):
+            return 0
+        raw_message = raw_output.get("raw")
+        usage = getattr(raw_message, "usage_metadata", None) or {}
+        total = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+            return total
+        response_metadata = getattr(raw_message, "response_metadata", None) or {}
+        token_usage = response_metadata.get("token_usage", {})
+        total = token_usage.get("total_tokens")
+        return (
+            total
+            if isinstance(total, int) and not isinstance(total, bool) and total >= 0
+            else 0
+        )
 
 
 class WorkerFactory:

@@ -92,7 +92,37 @@ def route_runtime_supervisor(
                         for dependency in task.dependencies
                     ],
                     "relevant_memory": relevant_memory,
+                    "review_feedback": state.get("review_feedback", {}).get(
+                        task_id,
+                        [],
+                    ),
                 },
             )
         )
     return sends
+
+
+def route_after_runtime_review(
+    state: Stage6State,
+) -> Literal["apply_review", "end"]:
+    """Continue only retry/replan decisions; terminal decisions end the run."""
+
+    decision = state.get("reviewer_decision")
+    if decision is not None and decision.action in {"retry_tasks", "replan"}:
+        return "apply_review"
+    return "end"
+
+
+def route_after_review_application(
+    state: Stage6State,
+) -> Literal["supervisor", "planner", "end"]:
+    """Route the guarded review mutation to scheduling or replanning."""
+
+    decision = state.get("reviewer_decision")
+    if decision is None:
+        return "end"
+    if decision.action == "retry_tasks":
+        return "supervisor"
+    if decision.action == "replan":
+        return "planner"
+    return "end"

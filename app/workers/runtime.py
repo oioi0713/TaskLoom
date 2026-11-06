@@ -253,6 +253,7 @@ class WorkerFactoryRuntime:
             runtime_context=RuntimeContext(
                 run_id=worker_input["run_id"],
                 relevant_memory=worker_input["relevant_memory"],
+                review_feedback=worker_input["review_feedback"],
             ),
         )
         result = worker.execute(

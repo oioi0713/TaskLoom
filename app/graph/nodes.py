@@ -151,3 +151,91 @@ def aggregate_runtime_node(state: Stage6State) -> dict:
         "total_steps": state.get("total_steps", 0) + 1,
         "events": events,
     }
+
+
+def apply_review_decision_node(state: Stage6State) -> dict:
+    """Apply a guarded retry or replan decision without losing audit history."""
+
+    decision = state.get("reviewer_decision")
+    if decision is None:
+        return {
+            "workflow_status": "failed",
+            "errors": ["Review application requires a ReviewerDecision."],
+        }
+
+    if decision.action == "retry_tasks":
+        targets = set(decision.target_task_ids)
+        descendants = set(targets)
+        changed = True
+        while changed:
+            changed = False
+            for task in state["tasks"]:
+                if task.task_id not in descendants and descendants.intersection(
+                    task.dependencies
+                ):
+                    descendants.add(task.task_id)
+                    changed = True
+
+        updated_tasks = []
+        review_feedback = dict(state.get("review_feedback", {}))
+        feedback = [*decision.problems, *decision.suggestions]
+        for task in state["tasks"]:
+            if task.task_id in targets:
+                updated_tasks.append(
+                    task.model_copy(
+                        update={
+                            "status": "pending",
+                            "retry_count": task.retry_count + 1,
+                        }
+                    )
+                )
+                review_feedback[task.task_id] = feedback or [
+                    "Reviewer requested a higher-quality replacement result."
+                ]
+            elif task.task_id in descendants:
+                updated_tasks.append(task.model_copy(update={"status": "pending"}))
+                review_feedback[task.task_id] = [
+                    "An upstream task was retried. Regenerate this result using "
+                    "the latest dependency outputs."
+                ]
+            else:
+                updated_tasks.append(task)
+
+        return {
+            "tasks": updated_tasks,
+            "ready_task_ids": [],
+            "resolved_agent_specs": [],
+            "review_feedback": review_feedback,
+            "retry_count": state.get("retry_count", 0) + len(targets),
+            "workflow_status": "running",
+            "final_output": None,
+            "events": [
+                WorkflowEvent(
+                    event_type="review.retry_applied",
+                    message="Reviewer invalidated targeted tasks and descendants.",
+                    data={
+                        "target_task_ids": sorted(targets),
+                        "invalidated_task_ids": sorted(descendants),
+                    },
+                )
+            ],
+        }
+
+    if decision.action == "replan":
+        return {
+            "ready_task_ids": [],
+            "resolved_agent_specs": [],
+            "replan_constraints": decision.replan_constraints,
+            "replan_count": state.get("replan_count", 0) + 1,
+            "workflow_status": "running",
+            "final_output": None,
+            "events": [
+                WorkflowEvent(
+                    event_type="review.replan_applied",
+                    message="Reviewer sent constraints back to Planner.",
+                    data={"constraints": decision.replan_constraints},
+                )
+            ],
+        }
+
+    return {}

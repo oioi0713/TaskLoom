@@ -13,6 +13,7 @@ from langchain_core.exceptions import LangChainException
 from openai import APIStatusError, OpenAIError
 
 from app.agents.planner import PlanGenerationError
+from app.agents.reviewer import ReviewGenerationError
 from app.config import get_settings
 from app.graph.builder import build_runtime_graph, create_runtime_initial_state
 from app.llm.factory import MissingLLMConfigurationError
@@ -22,7 +23,7 @@ from app.observability import LLMTraceRecorder, default_run_log_dir
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the stage-six Planner → Supervisor → dynamic Worker workflow."
+            "Run the stage-seven Planner → Worker → Reviewer closed loop."
         )
     )
     parser.add_argument("--goal", required=True, help="Goal for TaskLoom to execute.")
@@ -70,11 +71,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "timeout_seconds": settings.llm_timeout_seconds,
             "max_retries": settings.llm_max_retries,
             "planner_max_output_tokens": settings.llm_planner_max_output_tokens,
+            "reviewer_max_output_tokens": settings.llm_reviewer_max_output_tokens,
             "worker_max_output_tokens": settings.llm_worker_max_output_tokens,
         }
     )
     try:
-        _print_progress("开始阶段 6完整工作流")
+        _print_progress("开始阶段 7 Reviewer 闭环工作流")
         _print_progress(f"run_id={run_id}")
         _print_progress(f"本次运行日志目录：{recorder.run_dir}")
         graph = build_runtime_graph(
@@ -91,6 +93,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     except PlanGenerationError as exc:
+        recorder.update_run_metadata({"status": "failed", "error": str(exc)})
+        print(str(exc), file=sys.stderr)
+        return 1
+    except ReviewGenerationError as exc:
         recorder.update_run_metadata({"status": "failed", "error": str(exc)})
         print(str(exc), file=sys.stderr)
         return 1
@@ -139,6 +145,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
         "total_steps": state["total_steps"],
         "retry_count": state["retry_count"],
+        "replan_count": state["replan_count"],
         "errors": state["errors"],
         "events": [event.model_dump(mode="json") for event in state["events"]],
         "final_output": state["final_output"],

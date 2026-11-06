@@ -37,6 +37,7 @@ class PlannerInput(BaseModel):
     available_output_contracts: list[str] = Field(min_length=1)
     limits: PlannerLimits = Field(default_factory=PlannerLimits)
     recalled_memory: list[MemoryItem] = Field(default_factory=list)
+    replan_constraints: list[NonEmptyStr] = Field(default_factory=list)
 
     @field_validator("available_capabilities")
     @classmethod

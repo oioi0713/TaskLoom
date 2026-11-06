@@ -21,6 +21,7 @@ class RuntimeContext(BaseModel):
 
     run_id: NonEmptyStr
     relevant_memory: tuple[MemoryItem, ...] = Field(default_factory=tuple)
+    review_feedback: tuple[NonEmptyStr, ...] = Field(default_factory=tuple)
 
 
 class GrantedToolContext(BaseModel):
@@ -44,3 +45,4 @@ class WorkerExecutionContext(BaseModel):
     dependency_results: tuple[WorkerResult, ...] = Field(default_factory=tuple)
     relevant_memory: tuple[MemoryItem, ...] = Field(default_factory=tuple)
     granted_tools: tuple[GrantedToolContext, ...] = Field(default_factory=tuple)
+    review_feedback: tuple[NonEmptyStr, ...] = Field(default_factory=tuple)

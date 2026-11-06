@@ -69,6 +69,7 @@ def build_planner_messages(planner_input: PlannerInput) -> list[BaseMessage]:
         "recalled_memory": [
             item.model_dump(mode="json") for item in planner_input.recalled_memory
         ],
+        "replan_constraints": planner_input.replan_constraints,
     }
     return [
         SystemMessage(content=load_planner_system_prompt()),
@@ -329,6 +330,7 @@ def create_default_planner_input(
     *,
     limits: PlannerLimits | None = None,
     recalled_memory: list[MemoryItem] | None = None,
+    replan_constraints: list[str] | None = None,
 ) -> PlannerInput:
     """Build Planner input from the complete enabled stage-four registries."""
 
@@ -338,6 +340,7 @@ def create_default_planner_input(
         available_output_contracts=sorted(OUTPUT_CONTRACTS),
         limits=limits or PlannerLimits(),
         recalled_memory=recalled_memory or [],
+        replan_constraints=replan_constraints or [],
     )
 
 

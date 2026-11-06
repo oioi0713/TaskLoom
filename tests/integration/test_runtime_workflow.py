@@ -5,6 +5,7 @@ from typing import Any
 from app.contracts.budget import ExecutionBudget
 from app.contracts.output_models import ReportResult, ResearchResult
 from app.contracts.plan import ExecutionPlan
+from app.contracts.review import ReviewerDecision
 from app.contracts.subagent import SubAgentSpec
 from app.contracts.task import TaskSpec
 from app.graph.builder import (
@@ -22,6 +23,26 @@ class FixedPlanner:
     def plan(self, planner_input):
         self.inputs.append(planner_input)
         return self.plan_value
+
+
+class FixedReviewer:
+    def review(self, review_input):
+        return ReviewerDecision(
+            action="finish",
+            score=1.0,
+            problems=[],
+            suggestions=[],
+        )
+
+
+class SequentialReviewer:
+    def __init__(self, decisions: list[ReviewerDecision]) -> None:
+        self.decisions = list(decisions)
+        self.inputs = []
+
+    def review(self, review_input):
+        self.inputs.append(review_input)
+        return self.decisions.pop(0)
 
 
 class ContractStructuredModel:
@@ -121,6 +142,7 @@ def test_real_runtime_graph_connects_plan_to_dynamic_workers() -> None:
     progress_messages: list[str] = []
     graph = build_runtime_graph(
         planner=planner,
+        reviewer=FixedReviewer(),
         worker_factory=WorkerFactory(ContractAwareChatModel()),
         progress=progress_messages.append,
     )
@@ -154,3 +176,79 @@ def test_real_runtime_graph_connects_plan_to_dynamic_workers() -> None:
     assert any("Supervisor 选中任务" in message for message in progress_messages)
     assert any("Worker research" in message for message in progress_messages)
     assert any("Reviewer 结束：finish" in message for message in progress_messages)
+
+
+def test_reviewer_targeted_retry_reruns_task_and_descendants() -> None:
+    reviewer = SequentialReviewer(
+        [
+            ReviewerDecision(
+                action="retry_tasks",
+                score=0.5,
+                problems=["Research needs stronger detail"],
+                suggestions=["Expand the core concepts"],
+                target_task_ids=["research"],
+            ),
+            ReviewerDecision(action="finish", score=0.95),
+        ]
+    )
+    graph = build_runtime_graph(
+        planner=FixedPlanner(dynamic_plan()),
+        reviewer=reviewer,
+        worker_factory=WorkerFactory(ContractAwareChatModel()),
+    )
+
+    state = graph.invoke(
+        create_runtime_initial_state("Research LangGraph and produce a report")
+    )
+
+    assert state["workflow_status"] == "completed"
+    assert [result.task_id for result in state["worker_results"]] == [
+        "research",
+        "report",
+        "research",
+        "report",
+    ]
+    assert state["tasks"][0].retry_count == 1
+    assert state["retry_count"] == 1
+    assert len(reviewer.inputs) == 2
+    event_types = [event.event_type for event in state["events"]]
+    assert event_types.count("review.completed") == 2
+    assert "task.retry_scheduled" not in event_types
+
+
+def test_reviewer_replan_returns_constraints_to_planner() -> None:
+    planner = FixedPlanner(dynamic_plan())
+    reviewer = SequentialReviewer(
+        [
+            ReviewerDecision(
+                action="replan",
+                score=0.4,
+                problems=["The plan needs an explicit comparison"],
+                replan_constraints=["Add an explicit comparison before reporting"],
+            ),
+            ReviewerDecision(action="finish", score=0.95),
+        ]
+    )
+    graph = build_runtime_graph(
+        planner=planner,
+        reviewer=reviewer,
+        worker_factory=WorkerFactory(ContractAwareChatModel()),
+    )
+
+    state = graph.invoke(
+        create_runtime_initial_state("Research LangGraph and produce a report")
+    )
+
+    assert state["workflow_status"] == "completed"
+    assert state["plan_version"] == 2
+    assert state["replan_count"] == 1
+    assert len(planner.inputs) == 2
+    assert planner.inputs[1].replan_constraints == [
+        "Add an explicit comparison before reporting"
+    ]
+    assert [result.task_id for result in state["worker_results"]] == [
+        "research",
+        "report",
+        "research",
+        "report",
+    ]

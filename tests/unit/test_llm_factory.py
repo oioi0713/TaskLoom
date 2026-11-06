@@ -44,3 +44,4 @@ def test_configured_factory_creates_provider_without_api_request() -> None:
     assert str(model.openai_api_base).rstrip("/") == "https://example.invalid/v1"
     assert model.max_retries == 0
     assert model.max_tokens == 4096
+    assert settings.llm_reviewer_max_output_tokens == 2048

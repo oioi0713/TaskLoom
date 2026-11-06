@@ -13,7 +13,13 @@ from app.agents.planner import (
     create_default_planner_input,
     mock_planner_node,
 )
-from app.agents.reviewer import reviewer_node, runtime_reviewer_node
+from app.agents.reviewer import (
+    ReviewerAgent,
+    build_runtime_review_update,
+    build_runtime_reviewer_input,
+    reviewer_node,
+    runtime_reviewer_node,
+)
 from app.agents.supervisor import runtime_supervisor_node, supervisor_node
 from app.config import Settings, get_settings
 from app.contracts.budget import ExecutionBudget
@@ -21,9 +27,12 @@ from app.contracts.planner import PlannerLimits
 from app.graph.nodes import (
     aggregate_node,
     aggregate_runtime_node,
+    apply_review_decision_node,
     validate_plan_node,
 )
 from app.graph.routes import (
+    route_after_review_application,
+    route_after_runtime_review,
     route_after_validation,
     route_runtime_supervisor,
     route_supervisor,
@@ -121,6 +130,7 @@ def run_mock_workflow(
 def build_runtime_graph(
     *,
     planner: PlannerAgent | Any | None = None,
+    reviewer: ReviewerAgent | Any | None = None,
     worker_factory: WorkerFactory | None = None,
     settings: Settings | None = None,
     progress: Callable[[str], None] | None = None,
@@ -128,7 +138,7 @@ def build_runtime_graph(
 ) -> Any:
     """Compile the real Planner-to-Worker stage-six workflow."""
 
-    if planner is None or worker_factory is None:
+    if planner is None or reviewer is None or worker_factory is None:
         resolved = settings or get_settings()
         chat_model = create_chat_model(resolved)
         if planner is None:
@@ -147,8 +157,17 @@ def build_runtime_graph(
                 trace_recorder=trace_recorder,
                 model_name=resolved.llm_model,
             )
+        if reviewer is None:
+            reviewer = ReviewerAgent.from_chat_model(
+                chat_model,
+                structured_output_method=resolved.llm_structured_output_method,
+                trace_recorder=trace_recorder,
+                model_name=resolved.llm_model,
+                max_output_tokens=resolved.llm_reviewer_max_output_tokens,
+            )
 
     assert planner is not None
+    assert reviewer is not None
     assert worker_factory is not None
 
     def emit(message: str) -> None:
@@ -172,6 +191,7 @@ def build_runtime_graph(
             state["original_goal"],
             limits=limits,
             recalled_memory=state.get("memory_context", []),
+            replan_constraints=state.get("replan_constraints", []),
         )
         plan = run_with_heartbeat(
             lambda: planner.plan(planner_input),
@@ -183,6 +203,9 @@ def build_runtime_graph(
             "execution_plan": plan,
             "plan_version": state.get("plan_version", 0) + 1,
             "workflow_status": "running",
+            "reviewer_decision": None,
+            "review_feedback": {},
+            "replan_constraints": [],
             "events": [
                 WorkflowEvent(
                     event_type="plan.created",
@@ -220,8 +243,17 @@ def build_runtime_graph(
         return update
 
     def reviewer_with_progress(state: Stage6State) -> dict:
-        emit("Reviewer 开始检查所有任务是否完成")
-        update = runtime_reviewer_node(state)
+        emit("Reviewer 开始审核目标覆盖、结果质量和剩余预算")
+        if state.get("execution_plan") is None or not state.get("tasks"):
+            update = runtime_reviewer_node(state)
+        else:
+            review_input = build_runtime_reviewer_input(state)
+            decision = run_with_heartbeat(
+                lambda: reviewer.review(review_input),
+                progress=progress,
+                label="Reviewer LLM 请求",
+            )
+            update = build_runtime_review_update(state, decision)
         decision = update.get("reviewer_decision")
         emit(
             "Reviewer 结束："
@@ -236,6 +268,7 @@ def build_runtime_graph(
     builder.add_node("worker", worker_runtime.execute)
     builder.add_node("aggregate", aggregate_with_progress)
     builder.add_node("reviewer", reviewer_with_progress)
+    builder.add_node("apply_review", apply_review_decision_node)
 
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "validate_plan")
@@ -251,8 +284,17 @@ def build_runtime_graph(
     )
     builder.add_edge("worker", "aggregate")
     builder.add_edge("aggregate", "supervisor")
-    builder.add_edge("reviewer", END)
-    return builder.compile(name="taskloom-stage-6-runtime")
+    builder.add_conditional_edges(
+        "reviewer",
+        route_after_runtime_review,
+        {"apply_review": "apply_review", "end": END},
+    )
+    builder.add_conditional_edges(
+        "apply_review",
+        route_after_review_application,
+        {"supervisor": "supervisor", "planner": "planner", "end": END},
+    )
+    return builder.compile(name="taskloom-stage-7-runtime")
 
 
 def create_runtime_initial_state(
@@ -287,6 +329,8 @@ def create_runtime_initial_state(
         ),
         # Stage 8 will register executable tools. Metadata-only tools stay disabled.
         "enabled_tools": [] if enabled_tools is None else enabled_tools,
+        "review_feedback": {},
+        "replan_constraints": [],
         "final_output": None,
         "errors": [],
         "events": [],
@@ -299,6 +343,7 @@ def run_runtime_workflow(
     goal: str,
     *,
     planner: PlannerAgent | Any | None = None,
+    reviewer: ReviewerAgent | Any | None = None,
     worker_factory: WorkerFactory | None = None,
     settings: Settings | None = None,
     progress: Callable[[str], None] | None = None,
@@ -308,6 +353,7 @@ def run_runtime_workflow(
 
     graph = build_runtime_graph(
         planner=planner,
+        reviewer=reviewer,
         worker_factory=worker_factory,
         settings=settings,
         progress=progress,

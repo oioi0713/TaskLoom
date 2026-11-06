@@ -63,6 +63,8 @@ class Stage6State(AgentState):
     resolved_agent_specs: list[ResolvedSubAgentSpec]
     user_allowed_tools: list[str]
     enabled_tools: list[str]
+    review_feedback: dict[str, list[str]]
+    replan_constraints: list[str]
     workflow_status: Literal["created", "running", "completed", "failed"]
 
 
@@ -83,3 +85,4 @@ class RuntimeWorkerInput(TypedDict):
     spec: ResolvedSubAgentSpec
     dependency_results: list[WorkerResult]
     relevant_memory: list[MemoryItem]
+    review_feedback: list[str]
