@@ -42,6 +42,7 @@ from app.llm.factory import create_chat_model
 from app.observability import LLMTraceRecorder
 from app.progress import run_with_heartbeat
 from app.tools.registry import TOOL_REGISTRY
+from app.tools.runtime import EXECUTABLE_TOOL_NAMES
 from app.workers.factory import WorkerFactory
 from app.workers.runtime import (
     ExecutionTracker,
@@ -136,7 +137,7 @@ def build_runtime_graph(
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
 ) -> Any:
-    """Compile the real Planner-to-Worker stage-six workflow."""
+    """Compile the real workflow with stage-eight Worker Agent loops."""
 
     if planner is None or reviewer is None or worker_factory is None:
         resolved = settings or get_settings()
@@ -294,7 +295,7 @@ def build_runtime_graph(
         route_after_review_application,
         {"supervisor": "supervisor", "planner": "planner", "end": END},
     )
-    return builder.compile(name="taskloom-stage-7-runtime")
+    return builder.compile(name="taskloom-stage-8-runtime")
 
 
 def create_runtime_initial_state(
@@ -304,7 +305,7 @@ def create_runtime_initial_state(
     user_allowed_tools: list[str] | None = None,
     enabled_tools: list[str] | None = None,
 ) -> Stage6State:
-    """Create a complete state for one real stage-six workflow run."""
+    """Create a complete state for one real stage-eight workflow run."""
 
     return {
         "run_id": str(uuid4()),
@@ -327,8 +328,11 @@ def create_runtime_initial_state(
         "user_allowed_tools": (
             list(TOOL_REGISTRY) if user_allowed_tools is None else user_allowed_tools
         ),
-        # Stage 8 will register executable tools. Metadata-only tools stay disabled.
-        "enabled_tools": [] if enabled_tools is None else enabled_tools,
+        "enabled_tools": (
+            list(EXECUTABLE_TOOL_NAMES)
+            if enabled_tools is None
+            else enabled_tools
+        ),
         "review_feedback": {},
         "replan_constraints": [],
         "final_output": None,
@@ -349,7 +353,7 @@ def run_runtime_workflow(
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
 ) -> Stage6State:
-    """Run the complete real stage-six workflow and return its final state."""
+    """Run the complete real stage-eight workflow and return its final state."""
 
     graph = build_runtime_graph(
         planner=planner,

@@ -151,6 +151,8 @@ def test_worker_prompt_contains_only_bounded_context_and_granted_tools() -> None
     assert '"additionalProperties": false' in combined
     assert "API Key" not in combined
     assert "整段主会话" not in combined
+    assert "granted tool is optional permission" in combined
+    assert "Finalizer" in combined
 
 
 def test_worker_prompt_contains_reviewer_retry_feedback() -> None:

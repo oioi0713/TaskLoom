@@ -118,27 +118,6 @@ def runtime_supervisor_node(state: Stage6State) -> dict:
     ]
     candidates.sort(key=lambda task: (-task.priority, task.task_id))
 
-    consumed_tokens = sum(
-        result.token_usage for result in state.get("worker_results", [])
-    )
-    remaining_tokens = budget.total_token_budget - consumed_tokens
-    if candidates and remaining_tokens <= 0:
-        message = "Workflow exhausted its total token budget."
-        return {
-            "tasks": tasks,
-            "ready_task_ids": [],
-            "resolved_agent_specs": [],
-            "workflow_status": "failed",
-            "errors": [message],
-            "events": [
-                WorkflowEvent(
-                    event_type="run.budget_exhausted",
-                    message=message,
-                    data={"token_usage": consumed_tokens},
-                )
-            ],
-        }
-
     specs_by_task = {spec.task_id: spec for spec in state["agent_specs"]}
     running_count = sum(task.status == "running" for task in tasks)
     available_slots = max(0, budget.max_concurrency - running_count)
@@ -146,10 +125,7 @@ def runtime_supervisor_node(state: Stage6State) -> dict:
     selected = []
     resolved_specs: list[ResolvedSubAgentSpec] = []
     permission_events: list[WorkflowEvent] = []
-    allocatable_tokens = remaining_tokens
     for task in selected_candidates:
-        if allocatable_tokens <= 0:
-            break
         spec = specs_by_task[task.task_id]
         granted_tools = resolve_granted_tools(
             spec.required_capabilities,
@@ -160,7 +136,6 @@ def runtime_supervisor_node(state: Stage6State) -> dict:
         worker_token_budget = min(
             spec.token_budget,
             budget.max_worker_token_budget,
-            allocatable_tokens,
         )
         resolved = ResolvedSubAgentSpec.model_validate(
             {
@@ -175,7 +150,6 @@ def runtime_supervisor_node(state: Stage6State) -> dict:
         )
         selected.append(task)
         resolved_specs.append(resolved)
-        allocatable_tokens -= worker_token_budget
         permission_events.append(
             WorkflowEvent(
                 event_type="worker.permissions_resolved",

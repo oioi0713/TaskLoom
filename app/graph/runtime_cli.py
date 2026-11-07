@@ -1,4 +1,4 @@
-"""Command-line entry point for the complete stage-six runtime graph."""
+"""Command-line entry point for the complete stage-eight runtime graph."""
 
 from __future__ import annotations
 
@@ -23,16 +23,22 @@ from app.observability import LLMTraceRecorder, default_run_log_dir
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the stage-seven Planner → Worker → Reviewer closed loop."
+            "Run the stage-eight workflow with autonomous Worker tool loops."
         )
     )
     parser.add_argument("--goal", required=True, help="Goal for TaskLoom to execute.")
+    parser.add_argument(
+        "--disable-tools",
+        action="store_true",
+        help="Disable executable tools and run Workers in LLM-only mode.",
+    )
     parser.add_argument(
         "--log-dir",
         type=Path,
         default=None,
         help=(
-            "Directory for run.json, llm_calls.jsonl, and result.json. "
+            "Directory for run.json, llm_calls.jsonl, tool_calls.jsonl, "
+            "and result.json. "
             "Defaults to tests/log/<run_id>."
         ),
     )
@@ -57,7 +63,10 @@ def _print_progress(message: str) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    initial_state = create_runtime_initial_state(args.goal)
+    initial_state = create_runtime_initial_state(
+        args.goal,
+        enabled_tools=[] if args.disable_tools else None,
+    )
     run_id = initial_state["run_id"]
     log_dir = args.log_dir or default_run_log_dir(run_id)
     recorder = LLMTraceRecorder(log_dir, run_id=run_id)
@@ -73,10 +82,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "planner_max_output_tokens": settings.llm_planner_max_output_tokens,
             "reviewer_max_output_tokens": settings.llm_reviewer_max_output_tokens,
             "worker_max_output_tokens": settings.llm_worker_max_output_tokens,
+            "cumulative_token_budget_enforced": False,
+            "enabled_tools": initial_state["enabled_tools"],
+            "llm_calls_file": str(recorder.calls_path),
+            "tool_calls_file": str(recorder.tool_calls_path),
         }
     )
     try:
-        _print_progress("开始阶段 7 Reviewer 闭环工作流")
+        _print_progress("开始阶段 8 Worker Agent Loop 工作流")
         _print_progress(f"run_id={run_id}")
         _print_progress(f"本次运行日志目录：{recorder.run_dir}")
         graph = build_runtime_graph(
@@ -151,7 +164,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "final_output": state["final_output"],
         "log_dir": str(recorder.run_dir),
         "llm_calls_file": str(recorder.calls_path),
+        "tool_calls_file": str(recorder.tool_calls_path),
         "llm_call_count": recorder.call_count,
+        "tool_call_count": recorder.tool_call_count,
     }
     json_output = json.dumps(payload, ensure_ascii=False, indent=2)
     output_path = args.output or recorder.result_path
@@ -165,11 +180,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "status": state["workflow_status"],
             "finished_at": datetime.now().astimezone().isoformat(),
             "llm_call_count": recorder.call_count,
+            "tool_call_count": recorder.tool_call_count,
             "result_file": str(output_path.resolve()),
         }
     )
     _print_progress(f"最终 JSON 已保存到：{output_path.resolve()}")
     _print_progress(f"LLM 请求与返回消息已保存到：{recorder.calls_path}")
+    _print_progress(f"工具调用日志已保存到：{recorder.tool_calls_path}")
     if not args.no_print_json:
         print(json_output)
     return 0 if state["workflow_status"] == "completed" else 1

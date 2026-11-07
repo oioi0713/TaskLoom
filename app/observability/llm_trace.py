@@ -14,6 +14,8 @@ from uuid import uuid4
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
+from app.contracts.result import ToolCallRecord
+
 
 _BEARER_PATTERN = re.compile(
     r"(?i)(authorization\s*:\s*bearer\s+)([^\s\"']+)"
@@ -56,13 +58,23 @@ def _jsonable(value: Any) -> Any:
 
 
 def _serialize_messages(messages: list[BaseMessage]) -> list[dict[str, Any]]:
-    return [
-        {
+    serialized: list[dict[str, Any]] = []
+    for message in messages:
+        item: dict[str, Any] = {
             "role": getattr(message, "type", message.__class__.__name__),
             "content": _jsonable(message.content),
         }
-        for message in messages
-    ]
+        tool_calls = getattr(message, "tool_calls", None)
+        if tool_calls:
+            item["tool_calls"] = _jsonable(tool_calls)
+        tool_call_id = getattr(message, "tool_call_id", None)
+        if tool_call_id:
+            item["tool_call_id"] = tool_call_id
+        name = getattr(message, "name", None)
+        if name:
+            item["name"] = name
+        serialized.append(item)
+    return serialized
 
 
 class LLMTraceRecorder:
@@ -73,18 +85,26 @@ class LLMTraceRecorder:
         self.run_id = run_id
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.calls_path = self.run_dir / "llm_calls.jsonl"
+        self.tool_calls_path = self.run_dir / "tool_calls.jsonl"
         self.metadata_path = self.run_dir / "run.json"
         self.result_path = self.run_dir / "result.json"
         self._lock = threading.Lock()
         self._started_at: dict[str, float] = {}
         self._call_count = 0
+        self._tool_call_count = 0
         self._run_metadata: dict[str, Any] = {}
         self.calls_path.touch(exist_ok=True)
+        self.tool_calls_path.touch(exist_ok=True)
 
     @property
     def call_count(self) -> int:
         with self._lock:
             return self._call_count
+
+    @property
+    def tool_call_count(self) -> int:
+        with self._lock:
+            return self._tool_call_count
 
     def write_run_metadata(self, payload: dict[str, Any]) -> None:
         self._run_metadata = {
@@ -169,6 +189,32 @@ class LLMTraceRecorder:
                 "error": _redact_text(str(error)),
             }
         )
+
+    def record_tool_call(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        record: ToolCallRecord,
+    ) -> None:
+        """Persist one tool outcome immediately, including interrupted runs."""
+
+        event = {
+            "timestamp": datetime.now().astimezone().isoformat(),
+            "run_id": self.run_id,
+            "event": "tool.called",
+            "task_id": task_id,
+            "agent_id": agent_id,
+            **record.model_dump(mode="json"),
+        }
+        line = json.dumps(_jsonable(event), ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            self._tool_call_count += 1
+            with self.tool_calls_path.open(
+                "a", encoding="utf-8", newline="\n"
+            ) as handle:
+                handle.write(line + "\n")
+                handle.flush()
 
     def write_result(self, payload: dict[str, Any]) -> None:
         self.result_path.write_text(

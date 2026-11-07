@@ -13,6 +13,8 @@ def test_expected_registry_entries_exist() -> None:
     assert "web_research" in CAPABILITY_REGISTRY
     assert "web_search" in TOOL_REGISTRY
     assert "research_result_v1" in OUTPUT_CONTRACTS
+    assert "exact workspace-relative" in TOOL_REGISTRY["document_reader"].description
+    assert "path is unknown" in TOOL_REGISTRY["knowledge_search"].description
 
 
 def test_capability_tool_mapping_is_bounded() -> None:

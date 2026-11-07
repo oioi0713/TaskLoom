@@ -128,7 +128,7 @@ def test_scheduler_applies_priority_concurrency_permissions_and_budgets() -> Non
     ]
     assert [item.token_budget for item in update["resolved_agent_specs"]] == [
         1000,
-        500,
+        1000,
     ]
     statuses = {item.task_id: item.status for item in update["tasks"]}
     assert statuses == {"low": "pending", "high": "running", "medium": "running"}

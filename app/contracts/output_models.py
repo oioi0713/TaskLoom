@@ -1,5 +1,7 @@
 """Structured payloads available to workers through output contracts."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.contracts.types import NonEmptyStr
@@ -17,6 +19,12 @@ class Source(BaseModel):
     published_at: str | None = None
     accessed_at: str | None = None
     excerpt: str = ""
+    source_type: Literal[
+        "official_doc",
+        "paper",
+        "web_page",
+        "local_document",
+    ] | None = None
 
 
 class ResearchResult(BaseModel):

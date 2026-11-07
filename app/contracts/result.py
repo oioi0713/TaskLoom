@@ -14,11 +14,13 @@ class ToolCallRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    call_id: str | None = None
     tool_name: NonEmptyStr
     arguments: dict[str, Any] = Field(default_factory=dict)
     success: bool
     error: str | None = None
     execution_time_ms: int = Field(default=0, ge=0)
+    observation: dict[str, Any] | None = None
 
 
 class WorkerResult(BaseModel):
@@ -35,6 +37,7 @@ class WorkerResult(BaseModel):
         "timeout",
         "invalid_output",
         "permission_denied",
+        "budget_exhausted",
     ]
     output_contract: OutputContractName
     output: dict[str, Any] | None = None
