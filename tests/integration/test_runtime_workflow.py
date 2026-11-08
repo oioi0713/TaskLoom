@@ -159,11 +159,11 @@ def test_real_runtime_graph_connects_plan_to_dynamic_workers() -> None:
         ("research", "completed"),
         ("report", "completed"),
     ]
-    assert [result.task_id for result in state["worker_results"]] == [
+    assert [result.task_id for result in state["active_worker_results"]] == [
         "research",
         "report",
     ]
-    assert state["worker_results"][1].output["title"] == "LangGraph learning report"
+    assert state["active_worker_results"][1].output["title"] == "LangGraph learning report"
     assert state["reviewer_decision"].action == "finish"
     assert state["errors"] == []
     assert planner.inputs[0].user_goal == initial_state["original_goal"]
@@ -202,7 +202,7 @@ def test_reviewer_targeted_retry_reruns_task_and_descendants() -> None:
     )
 
     assert state["workflow_status"] == "completed"
-    assert [result.task_id for result in state["worker_results"]] == [
+    assert [result.task_id for result in state["active_worker_results"]] == [
         "research",
         "report",
         "research",
@@ -246,9 +246,7 @@ def test_reviewer_replan_returns_constraints_to_planner() -> None:
     assert planner.inputs[1].replan_constraints == [
         "Add an explicit comparison before reporting"
     ]
-    assert [result.task_id for result in state["worker_results"]] == [
-        "research",
-        "report",
+    assert [result.task_id for result in state["active_worker_results"]] == [
         "research",
         "report",
     ]

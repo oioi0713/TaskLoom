@@ -30,6 +30,10 @@ from app.graph.nodes import (
     apply_review_decision_node,
     validate_plan_node,
 )
+from app.graph.rehydration import (
+    with_rehydrated_state,
+    with_rehydrated_worker_input,
+)
 from app.graph.routes import (
     route_after_review_application,
     route_after_runtime_review,
@@ -99,7 +103,7 @@ def create_initial_state(goal: str) -> Stage3State:
         "plan_version": 0,
         "tasks": [],
         "agent_specs": [],
-        "worker_results": [],
+        "active_worker_results": [],
         "ready_task_ids": [],
         "reviewer_decision": None,
         "retry_count": 0,
@@ -136,8 +140,11 @@ def build_runtime_graph(
     settings: Settings | None = None,
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
+    checkpointer: Any | None = None,
+    interrupt_before: list[str] | None = None,
+    interrupt_after: list[str] | None = None,
 ) -> Any:
-    """Compile the real workflow with stage-eight Worker Agent loops."""
+    """Compile the real workflow with Worker loops and optional checkpoints."""
 
     if planner is None or reviewer is None or worker_factory is None:
         resolved = settings or get_settings()
@@ -263,53 +270,69 @@ def build_runtime_graph(
         return update
 
     builder = StateGraph(Stage6State)
-    builder.add_node("planner", real_planner_node)
-    builder.add_node("validate_plan", validate_plan_node)
-    builder.add_node("supervisor", runtime_supervisor_with_progress)
-    builder.add_node("worker", worker_runtime.execute)
-    builder.add_node("aggregate", aggregate_with_progress)
-    builder.add_node("reviewer", reviewer_with_progress)
-    builder.add_node("apply_review", apply_review_decision_node)
+    builder.add_node("planner", with_rehydrated_state(real_planner_node))
+    builder.add_node("validate_plan", with_rehydrated_state(validate_plan_node))
+    builder.add_node(
+        "supervisor",
+        with_rehydrated_state(runtime_supervisor_with_progress),
+    )
+    builder.add_node(
+        "worker",
+        with_rehydrated_worker_input(worker_runtime.execute),
+    )
+    builder.add_node("aggregate", with_rehydrated_state(aggregate_with_progress))
+    builder.add_node("reviewer", with_rehydrated_state(reviewer_with_progress))
+    builder.add_node(
+        "apply_review",
+        with_rehydrated_state(apply_review_decision_node),
+    )
 
     builder.add_edge(START, "planner")
     builder.add_edge("planner", "validate_plan")
     builder.add_conditional_edges(
         "validate_plan",
-        route_after_validation,
+        with_rehydrated_state(route_after_validation),
         {"supervisor": "supervisor", "reviewer": "reviewer"},
     )
     builder.add_conditional_edges(
         "supervisor",
-        route_runtime_supervisor,
+        with_rehydrated_state(route_runtime_supervisor),
         ["worker", "reviewer"],
     )
     builder.add_edge("worker", "aggregate")
     builder.add_edge("aggregate", "supervisor")
     builder.add_conditional_edges(
         "reviewer",
-        route_after_runtime_review,
+        with_rehydrated_state(route_after_runtime_review),
         {"apply_review": "apply_review", "end": END},
     )
     builder.add_conditional_edges(
         "apply_review",
-        route_after_review_application,
+        with_rehydrated_state(route_after_review_application),
         {"supervisor": "supervisor", "planner": "planner", "end": END},
     )
-    return builder.compile(name="taskloom-stage-8-runtime")
+    return builder.compile(
+        checkpointer=checkpointer,
+        interrupt_before=interrupt_before,
+        interrupt_after=interrupt_after,
+        name="taskloom-stage-9-runtime",
+    )
 
 
 def create_runtime_initial_state(
     goal: str,
     *,
+    thread_id: str | None = None,
     budget: ExecutionBudget | None = None,
     user_allowed_tools: list[str] | None = None,
     enabled_tools: list[str] | None = None,
 ) -> Stage6State:
-    """Create a complete state for one real stage-eight workflow run."""
+    """Create a complete state for one checkpointable runtime workflow."""
 
+    run_id = str(uuid4())
     return {
-        "run_id": str(uuid4()),
-        "thread_id": "stage-6-runtime",
+        "run_id": run_id,
+        "thread_id": thread_id or run_id,
         "user_id": "local-user",
         "original_goal": goal,
         "clarified_goal": goal,
@@ -317,7 +340,7 @@ def create_runtime_initial_state(
         "tasks": [],
         "agent_specs": [],
         "resolved_agent_specs": [],
-        "worker_results": [],
+        "active_worker_results": [],
         "ready_task_ids": [],
         "reviewer_decision": None,
         "retry_count": 0,
@@ -353,14 +376,23 @@ def run_runtime_workflow(
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
 ) -> Stage6State:
-    """Run the complete real stage-eight workflow and return its final state."""
+    """Run the complete workflow with a process-local memory checkpointer."""
 
-    graph = build_runtime_graph(
-        planner=planner,
-        reviewer=reviewer,
-        worker_factory=worker_factory,
-        settings=settings,
-        progress=progress,
-        trace_recorder=trace_recorder,
-    )
-    return graph.invoke(create_runtime_initial_state(goal))
+    from app.checkpoint import CheckpointSession, open_checkpoint_saver
+
+    resolved_settings = settings or get_settings()
+    with open_checkpoint_saver(resolved_settings) as (_, checkpointer):
+        graph = build_runtime_graph(
+            planner=planner,
+            reviewer=reviewer,
+            worker_factory=worker_factory,
+            settings=resolved_settings,
+            progress=progress,
+            trace_recorder=trace_recorder,
+            checkpointer=checkpointer,
+        )
+        initial_state = create_runtime_initial_state(goal)
+        return CheckpointSession(
+            graph=graph,
+            thread_id=initial_state["thread_id"],
+        ).start(initial_state)

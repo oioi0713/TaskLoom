@@ -18,6 +18,7 @@ from app.contracts.output_registry import OUTPUT_CONTRACTS, validate_output
 from app.contracts.result import WorkerResult
 from app.contracts.subagent import ResolvedSubAgentSpec
 from app.contracts.task import TaskSpec
+from app.graph.rehydration import rehydrate_tool_call_records
 from app.llm.factory import create_chat_model
 from app.observability import LLMTraceRecorder
 from app.progress import run_with_heartbeat
@@ -326,7 +327,7 @@ class IsolatedWorker:
                 status = outcome.status
                 error = outcome.error
                 token_usage = outcome.token_usage
-                tool_calls = outcome.tool_calls
+                tool_calls = rehydrate_tool_call_records(outcome.tool_calls)
             except Exception as exc:
                 output = None
                 status = "failed"

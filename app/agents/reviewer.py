@@ -166,7 +166,7 @@ def build_runtime_reviewer_input(state: Stage6State) -> ReviewerInput:
     current_task_ids = {task.task_id for task in state["tasks"]}
     latest_by_task = {
         result.task_id: result
-        for result in state.get("worker_results", [])
+        for result in state.get("active_worker_results", [])
         if result.task_id in current_task_ids
     }
     budget = state["budget"]
@@ -269,7 +269,8 @@ def build_runtime_review_update(
     }
     if decision.action == "finish":
         latest_results = {
-            result.task_id: result for result in state.get("worker_results", [])
+            result.task_id: result
+            for result in state.get("active_worker_results", [])
         }
         depended_on = {
             dependency
@@ -306,7 +307,7 @@ def reviewer_node(state: Stage3State) -> dict:
 
     completed_ids = {
         result.task_id
-        for result in state.get("worker_results", [])
+        for result in state.get("active_worker_results", [])
         if result.status == "completed"
     }
     expected_ids = {task.task_id for task in state["tasks"]}
@@ -316,7 +317,9 @@ def reviewer_node(state: Stage3State) -> dict:
 
     if all_tasks_completed and not state.get("errors"):
         report_result = next(
-            result for result in state["worker_results"] if result.task_id == "T5"
+            result
+            for result in state["active_worker_results"]
+            if result.task_id == "T5"
         )
         report = ReportResult.model_validate(report_result.output)
         decision = ReviewerDecision(
@@ -366,7 +369,8 @@ def runtime_reviewer_node(state: Stage6State) -> dict:
     """Finish only when every dynamic task has a completed WorkerResult."""
 
     latest_results = {
-        result.task_id: result for result in state.get("worker_results", [])
+        result.task_id: result
+        for result in state.get("active_worker_results", [])
     }
     incomplete = [task for task in state["tasks"] if task.status != "completed"]
     if not incomplete and not state.get("errors"):

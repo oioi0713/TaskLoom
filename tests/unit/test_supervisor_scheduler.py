@@ -150,7 +150,7 @@ def test_scheduler_does_not_duplicate_claim_running_tasks() -> None:
 def test_aggregator_retries_once_then_marks_task_failed() -> None:
     running = task("retry_me", status="running", max_retries=2)
     state = scheduler_state([running], [spec("retry_me")])
-    state["worker_results"] = [failed_result("retry_me", "timeout")]
+    state["active_worker_results"] = [failed_result("retry_me", "timeout")]
 
     first = aggregate_runtime_node(state)
 
@@ -159,7 +159,7 @@ def test_aggregator_retries_once_then_marks_task_failed() -> None:
     assert first["retry_count"] == 1
 
     state["tasks"] = [first["tasks"][0].model_copy(update={"status": "running"})]
-    state["worker_results"] = [
+    state["active_worker_results"] = [
         failed_result("retry_me", "timeout"),
         failed_result("retry_me", "invalid_output"),
     ]
@@ -174,7 +174,9 @@ def test_aggregator_retries_once_then_marks_task_failed() -> None:
 def test_permission_denied_is_not_retried() -> None:
     running = task("denied", status="running")
     state = scheduler_state([running], [spec("denied")])
-    state["worker_results"] = [failed_result("denied", "permission_denied")]
+    state["active_worker_results"] = [
+        failed_result("denied", "permission_denied")
+    ]
 
     update = aggregate_runtime_node(state)
 
@@ -223,7 +225,7 @@ def test_runtime_route_sends_only_dependencies_and_relevant_memory() -> None:
     state = scheduler_state([current_task], [base_spec])
     state["ready_task_ids"] = ["current"]
     state["resolved_agent_specs"] = [resolved]
-    state["worker_results"] = [completed_result("source")]
+    state["active_worker_results"] = [completed_result("source")]
     state["memory_context"] = [
         MemoryItem(memory_id="global", content="global constraint", scope=[]),
         MemoryItem(memory_id="match", content="LangGraph preference", scope=["LangGraph"]),

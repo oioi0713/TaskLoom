@@ -105,7 +105,7 @@ def runtime_state(*, task: TaskSpec | None = None) -> dict:
         "execution_plan": plan,
         "tasks": [selected_task],
         "agent_specs": plan.agents,
-        "worker_results": [completed_result()],
+        "active_worker_results": [completed_result()],
         "workflow_status": "running",
     }
 

@@ -1,5 +1,7 @@
 """Non-agent graph nodes for validation and result aggregation."""
 
+from langgraph.types import Overwrite
+
 from app.graph.state import Stage3State, Stage6State, WorkflowEvent
 from app.planning.validator import PlanGuard
 
@@ -49,7 +51,8 @@ def aggregate_node(state: Stage3State) -> dict:
     """Apply all reducer-aggregated worker results to task status."""
 
     results_by_task = {
-        result.task_id: result for result in state.get("worker_results", [])
+        result.task_id: result
+        for result in state.get("active_worker_results", [])
     }
     updated_tasks = []
     for task in state["tasks"]:
@@ -90,7 +93,8 @@ def aggregate_runtime_node(state: Stage6State) -> dict:
     """Apply latest real Worker results and enforce bounded task retries."""
 
     latest_results = {
-        result.task_id: result for result in state.get("worker_results", [])
+        result.task_id: result
+        for result in state.get("active_worker_results", [])
     }
     retryable_statuses = {"failed", "timeout", "invalid_output"}
     retried_ids: list[str] = []
@@ -223,12 +227,21 @@ def apply_review_decision_node(state: Stage6State) -> dict:
 
     if decision.action == "replan":
         return {
+            # Everything derived from the rejected plan leaves the active
+            # state. Historical audit data remains in logs/checkpoint history
+            # and will later move to the audit database.
+            "execution_plan": None,
+            "tasks": [],
+            "agent_specs": [],
+            "active_worker_results": Overwrite(value=[]),
             "ready_task_ids": [],
             "resolved_agent_specs": [],
+            "review_feedback": {},
             "replan_constraints": decision.replan_constraints,
             "replan_count": state.get("replan_count", 0) + 1,
             "workflow_status": "running",
             "final_output": None,
+            "errors": Overwrite(value=[]),
             "events": [
                 WorkflowEvent(
                     event_type="review.replan_applied",

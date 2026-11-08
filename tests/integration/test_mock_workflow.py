@@ -19,14 +19,14 @@ def test_mock_workflow_completes_all_five_tasks(workflow_run) -> None:
         ("T4", "completed"),
         ("T5", "completed"),
     ]
-    assert {result.task_id for result in state["worker_results"]} == {
+    assert {result.task_id for result in state["active_worker_results"]} == {
         "T1",
         "T2",
         "T3",
         "T4",
         "T5",
     }
-    assert len(state["worker_results"]) == 5
+    assert len(state["active_worker_results"]) == 5
 
 
 def test_first_three_tasks_execute_in_parallel(workflow_run) -> None:
@@ -54,11 +54,13 @@ def test_dependent_tasks_wait_for_prerequisites(workflow_run) -> None:
 def test_reducer_aggregates_results_once_per_task(workflow_run) -> None:
     state, _ = workflow_run
 
-    result_ids = [result.task_id for result in state["worker_results"]]
+    result_ids = [result.task_id for result in state["active_worker_results"]]
 
     assert len(result_ids) == len(set(result_ids)) == 5
     comparison = next(
-        result for result in state["worker_results"] if result.task_id == "T4"
+        result
+        for result in state["active_worker_results"]
+        if result.task_id == "T4"
     )
     assert len(comparison.output["options"]) == 3
 
@@ -75,6 +77,10 @@ def test_reviewer_finishes_with_report_output(workflow_run) -> None:
 def test_mock_workflow_uses_no_llm_or_tools(workflow_run) -> None:
     state, _ = workflow_run
 
-    assert all(result.token_usage == 0 for result in state["worker_results"])
-    assert all(result.tool_calls == [] for result in state["worker_results"])
-    assert all(result.sources == [] for result in state["worker_results"])
+    assert all(
+        result.token_usage == 0 for result in state["active_worker_results"]
+    )
+    assert all(
+        result.tool_calls == [] for result in state["active_worker_results"]
+    )
+    assert all(result.sources == [] for result in state["active_worker_results"])

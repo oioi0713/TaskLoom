@@ -37,13 +37,16 @@ class Settings(BaseSettings):
     llm_structured_output_method: Literal["function_calling", "json_schema"] = (
         "function_calling"
     )
+    checkpoint_backend: Literal["memory", "redis"] = "memory"
+    redis_url: SecretStr | None = None
+    checkpoint_ttl_minutes: int = Field(default=1440, ge=1)
 
     @field_validator("llm_model", mode="before")
     @classmethod
     def normalize_model_name(cls, value: object) -> str:
         return value.strip() if isinstance(value, str) else value
 
-    @field_validator("llm_api_key", "llm_base_url", mode="before")
+    @field_validator("llm_api_key", "llm_base_url", "redis_url", mode="before")
     @classmethod
     def blank_optional_llm_values_are_none(cls, value: object) -> object:
         if isinstance(value, str) and not value.strip():

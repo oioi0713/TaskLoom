@@ -27,7 +27,8 @@ def route_supervisor(
     tasks_by_id = {task.task_id: task for task in state["tasks"]}
     specs_by_task_id = {spec.task_id: spec for spec in state["agent_specs"]}
     results_by_task_id = {
-        result.task_id: result for result in state.get("worker_results", [])
+        result.task_id: result
+        for result in state.get("active_worker_results", [])
     }
     sends: list[Send] = []
     for task_id in ready_task_ids:
@@ -65,7 +66,8 @@ def route_runtime_supervisor(
         spec.task_id: spec for spec in state["resolved_agent_specs"]
     }
     latest_results = {
-        result.task_id: result for result in state.get("worker_results", [])
+        result.task_id: result
+        for result in state.get("active_worker_results", [])
     }
     sends: list[Send] = []
     for task_id in ready_task_ids:

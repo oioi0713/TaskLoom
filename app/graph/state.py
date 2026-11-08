@@ -36,7 +36,7 @@ class AgentState(TypedDict):
     plan_version: int
     tasks: list[TaskSpec]
     agent_specs: list[SubAgentSpec]
-    worker_results: Annotated[list[WorkerResult], operator.add]
+    active_worker_results: Annotated[list[WorkerResult], operator.add]
     ready_task_ids: list[str]
     reviewer_decision: ReviewerDecision | None
     retry_count: int

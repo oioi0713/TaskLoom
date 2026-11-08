@@ -28,7 +28,7 @@ class FakeGraph:
             "workflow_status": "completed",
             "plan_version": 1,
             "tasks": [task],
-            "worker_results": [
+            "active_worker_results": [
                 WorkerResult(
                     run_id=state["run_id"],
                     task_id="report",
@@ -71,6 +71,8 @@ def test_runtime_cli_prints_every_worker_result(
             "Create a report",
             "--log-dir",
             str(log_dir),
+            "--checkpoint-backend",
+            "memory",
         ]
     )
     captured = capsys.readouterr()
@@ -78,7 +80,7 @@ def test_runtime_cli_prints_every_worker_result(
 
     assert exit_code == 0
     assert payload["workflow_status"] == "completed"
-    assert payload["worker_results"][0]["task_id"] == "report"
+    assert payload["active_worker_results"][0]["task_id"] == "report"
     assert payload["reviewer_decision"]["action"] == "finish"
     saved_payload = json.loads(
         (log_dir / "result.json").read_text(encoding="utf-8")
@@ -87,7 +89,7 @@ def test_runtime_cli_prints_every_worker_result(
     run_metadata = json.loads((log_dir / "run.json").read_text(encoding="utf-8"))
     assert run_metadata["status"] == "completed"
     assert (log_dir / "llm_calls.jsonl").read_text(encoding="utf-8") == ""
-    assert "开始阶段 8 Worker Agent Loop 工作流" in captured.err
+    assert "开始阶段 9 外层工作流 Checkpoint" in captured.err
     assert "最终 JSON 已保存到" in captured.err
 
 
@@ -109,6 +111,8 @@ def test_runtime_cli_can_save_without_printing_large_json(
             "--log-dir",
             str(log_dir),
             "--no-print-json",
+            "--checkpoint-backend",
+            "memory",
         ]
     )
     captured = capsys.readouterr()
@@ -118,3 +122,24 @@ def test_runtime_cli_can_save_without_printing_large_json(
     assert json.loads((log_dir / "result.json").read_text(encoding="utf-8"))[
         "workflow_status"
     ] == "completed"
+
+
+def test_session_id_requires_redis_checkpoint_backend(
+    capsys,
+    tmp_path,
+) -> None:
+    exit_code = main(
+        [
+            "--goal",
+            "Create a report",
+            "--session-id",
+            "chat-1",
+            "--log-dir",
+            str(tmp_path / "session-log"),
+            "--checkpoint-backend",
+            "memory",
+        ]
+    )
+
+    assert exit_code == 4
+    assert "--session-id 需要使用 Redis" in capsys.readouterr().err

@@ -129,7 +129,7 @@ class MockWorkerRuntime:
                 tool_calls=[],
             )
             return {
-                "worker_results": [result],
+                "active_worker_results": [result],
                 "events": [
                     WorkflowEvent(
                         event_type="worker.completed",
@@ -274,7 +274,7 @@ class WorkerFactoryRuntime:
             else "worker.failed"
         )
         return {
-            "worker_results": [result],
+            "active_worker_results": [result],
             "events": [
                 WorkflowEvent(
                     event_type="worker.created",

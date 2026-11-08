@@ -11,6 +11,9 @@ def test_settings_have_safe_development_defaults() -> None:
     assert settings.environment == "development"
     assert settings.log_level == "INFO"
     assert settings.max_workers == 3
+    assert settings.checkpoint_backend == "memory"
+    assert settings.redis_url is None
+    assert settings.checkpoint_ttl_minutes == 1440
 
 
 def test_settings_read_prefixed_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,8 +39,24 @@ def test_blank_llm_values_are_normalized() -> None:
         llm_model="  ",
         llm_api_key="  ",
         llm_base_url="",
+        redis_url="  ",
     )
 
     assert settings.llm_model == ""
     assert settings.llm_api_key is None
     assert settings.llm_base_url is None
+    assert settings.redis_url is None
+
+
+def test_redis_checkpoint_settings_are_loaded_as_secret() -> None:
+    settings = Settings(
+        _env_file=None,
+        checkpoint_backend="redis",
+        redis_url="redis://:password@127.0.0.1:6379/0",
+        checkpoint_ttl_minutes=720,
+    )
+
+    assert settings.checkpoint_backend == "redis"
+    assert settings.redis_url is not None
+    assert settings.redis_url.get_secret_value().startswith("redis://")
+    assert settings.checkpoint_ttl_minutes == 720

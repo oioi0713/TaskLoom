@@ -6,6 +6,7 @@ from app.graph.routes import (
     route_after_review_application,
     route_after_runtime_review,
 )
+from langgraph.types import Overwrite
 from tests.unit.test_reviewer_agent import completed_task, runtime_state
 
 
@@ -69,6 +70,16 @@ def test_replan_records_constraints_and_routes_to_planner() -> None:
 
     assert update["replan_count"] == 1
     assert update["replan_constraints"] == ["Add a comparison task"]
+    assert isinstance(update["active_worker_results"], Overwrite)
+    assert update["active_worker_results"].value == []
+    assert update["execution_plan"] is None
+    assert update["tasks"] == []
+    assert update["agent_specs"] == []
+    assert update["resolved_agent_specs"] == []
+    assert update["review_feedback"] == {}
+    assert isinstance(update["errors"], Overwrite)
+    assert update["errors"].value == []
+    assert "memory_context" not in update
     state.update(update)
     assert route_after_review_application(state) == "planner"
 
