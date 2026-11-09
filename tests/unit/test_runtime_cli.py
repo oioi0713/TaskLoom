@@ -89,7 +89,7 @@ def test_runtime_cli_prints_every_worker_result(
     run_metadata = json.loads((log_dir / "run.json").read_text(encoding="utf-8"))
     assert run_metadata["status"] == "completed"
     assert (log_dir / "llm_calls.jsonl").read_text(encoding="utf-8") == ""
-    assert "开始阶段 9 外层工作流 Checkpoint" in captured.err
+    assert "开始阶段 10 Session Memory 与上下文压缩工作流" in captured.err
     assert "最终 JSON 已保存到" in captured.err
 
 

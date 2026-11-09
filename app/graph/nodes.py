@@ -96,7 +96,12 @@ def aggregate_runtime_node(state: Stage6State) -> dict:
         result.task_id: result
         for result in state.get("active_worker_results", [])
     }
-    retryable_statuses = {"failed", "timeout", "invalid_output"}
+    retryable_statuses = {
+        "failed",
+        "timeout",
+        "invalid_output",
+        "context_exhausted",
+    }
     retried_ids: list[str] = []
     completed_ids: list[str] = []
     failed_ids: list[str] = []

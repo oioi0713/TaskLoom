@@ -20,6 +20,7 @@ from app.contracts.subagent import ResolvedSubAgentSpec
 from app.contracts.task import TaskSpec
 from app.graph.rehydration import rehydrate_tool_call_records
 from app.llm.factory import create_chat_model
+from app.memory.compression import estimate_text_tokens
 from app.observability import LLMTraceRecorder
 from app.progress import run_with_heartbeat
 from app.tools.registry import TOOL_REGISTRY
@@ -268,6 +269,10 @@ class IsolatedWorker:
         tool_runtime: ToolRuntime | None = None,
         trace_recorder: LLMTraceRecorder | None = None,
         model_name: str | None = None,
+        context_window_tokens: int = 32768,
+        context_safety_margin_tokens: int = 1024,
+        tool_schema_tokens: int = 0,
+        summary_model: Any | None = None,
     ) -> None:
         self._structured_model = structured_model
         self._context: WorkerExecutionContext | None = context
@@ -282,6 +287,10 @@ class IsolatedWorker:
         self._tool_runtime = tool_runtime
         self._trace_recorder = trace_recorder
         self._model_name = model_name
+        self._context_window_tokens = context_window_tokens
+        self._context_safety_margin_tokens = context_safety_margin_tokens
+        self._tool_schema_tokens = tool_schema_tokens
+        self._summary_model = summary_model
         self._released = False
 
     @property
@@ -319,6 +328,10 @@ class IsolatedWorker:
                     structured_model=self._structured_model,
                     tool_runtime=self._tool_runtime,
                     max_output_tokens=self._max_output_tokens,
+                    context_window_tokens=self._context_window_tokens,
+                    context_safety_margin_tokens=self._context_safety_margin_tokens,
+                    tool_schema_tokens=self._tool_schema_tokens,
+                    summary_model=self._summary_model,
                     progress=progress,
                     trace_recorder=self._trace_recorder,
                     model_name=self._model_name,
@@ -528,6 +541,8 @@ class WorkerFactory:
         trace_recorder: LLMTraceRecorder | None = None,
         model_name: str | None = None,
         tool_runtime: ToolRuntime | None = None,
+        context_window_tokens: int = 32768,
+        context_safety_margin_tokens: int = 1024,
     ) -> None:
         if max_output_tokens < 1:
             raise ValueError("max_output_tokens must be positive")
@@ -537,6 +552,8 @@ class WorkerFactory:
         self._trace_recorder = trace_recorder
         self._model_name = model_name
         self._tool_runtime = tool_runtime or create_default_tool_runtime()
+        self._context_window_tokens = context_window_tokens
+        self._context_safety_margin_tokens = context_safety_margin_tokens
 
     def create_worker(
         self,
@@ -562,6 +579,8 @@ class WorkerFactory:
             if name in self._tool_runtime.executable_tools
         ]
         loop_model = None
+        summary_model = None
+        tool_schema_tokens = 0
         if executable_grants and hasattr(self._chat_model, "bind_tools"):
             tool_schemas = [
                 self._tool_runtime.tool_schema(name, TOOL_REGISTRY[name].description)
@@ -571,6 +590,13 @@ class WorkerFactory:
                 tool_schemas,
                 tool_choice="auto",
             ).bind(max_tokens=max_output_tokens)
+            tool_schema_tokens = estimate_text_tokens(tool_schemas)
+            if hasattr(self._chat_model, "invoke"):
+                summary_model = (
+                    self._chat_model.bind(max_tokens=min(1024, max_output_tokens))
+                    if hasattr(self._chat_model, "bind")
+                    else self._chat_model
+                )
         return IsolatedWorker(
             structured_model=structured_model,
             context=context,
@@ -579,6 +605,10 @@ class WorkerFactory:
             tool_runtime=self._tool_runtime if loop_model is not None else None,
             trace_recorder=self._trace_recorder,
             model_name=self._model_name,
+            context_window_tokens=self._context_window_tokens,
+            context_safety_margin_tokens=self._context_safety_margin_tokens,
+            tool_schema_tokens=tool_schema_tokens,
+            summary_model=summary_model,
         )
 
 
@@ -600,5 +630,7 @@ def create_worker(
         max_output_tokens=resolved.llm_worker_max_output_tokens,
         trace_recorder=trace_recorder,
         model_name=resolved.llm_model,
+        context_window_tokens=resolved.llm_context_window_tokens,
+        context_safety_margin_tokens=resolved.context_safety_margin_tokens,
     )
     return factory.create_worker(task, spec, dependency_results, runtime_context)

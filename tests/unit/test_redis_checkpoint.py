@@ -139,6 +139,7 @@ def test_legacy_worker_results_are_migrated_to_active_results() -> None:
         token_usage=0,
     )
     state = create_runtime_initial_state("Resume a legacy checkpoint")
+    state.pop("session_id")
     state.pop("active_worker_results")
     state["worker_results"] = [_constructor_envelope(result)]
 
@@ -146,6 +147,7 @@ def test_legacy_worker_results_are_migrated_to_active_results() -> None:
 
     assert restored["active_worker_results"] == [result]
     assert "worker_results" not in restored
+    assert restored["session_id"] == restored["thread_id"]
 
 
 def test_redis_saver_receives_sliding_ttl(monkeypatch) -> None:

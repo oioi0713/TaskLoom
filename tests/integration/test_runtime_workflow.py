@@ -45,6 +45,14 @@ class SequentialReviewer:
         return self.decisions.pop(0)
 
 
+class RecordingMemoryStore:
+    def __init__(self) -> None:
+        self.saved: list[tuple[str, list[Any]]] = []
+
+    def save(self, session_id: str, items: list[Any]) -> None:
+        self.saved.append((session_id, list(items)))
+
+
 class ContractStructuredModel:
     def __init__(self, output_model: type) -> None:
         self.output_model = output_model
@@ -176,6 +184,30 @@ def test_real_runtime_graph_connects_plan_to_dynamic_workers() -> None:
     assert any("Supervisor 选中任务" in message for message in progress_messages)
     assert any("Worker research" in message for message in progress_messages)
     assert any("Reviewer 结束：finish" in message for message in progress_messages)
+
+
+def test_terminal_review_persists_bounded_session_memory() -> None:
+    memory_store = RecordingMemoryStore()
+    graph = build_runtime_graph(
+        planner=FixedPlanner(dynamic_plan()),
+        reviewer=FixedReviewer(),
+        worker_factory=WorkerFactory(ContractAwareChatModel()),
+        session_memory_store=memory_store,
+    )
+
+    state = graph.invoke(
+        create_runtime_initial_state(
+            "Research LangGraph and produce a report",
+            session_id="chat-stage10",
+        )
+    )
+
+    assert memory_store.saved
+    session_id, saved = memory_store.saved[-1]
+    assert session_id == "chat-stage10"
+    assert saved == state["memory_context"]
+    assert any("会话目标" in item.content for item in saved)
+    assert any(item.source_task_id == "research" for item in saved)
 
 
 def test_reviewer_targeted_retry_reruns_task_and_descendants() -> None:

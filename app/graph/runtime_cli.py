@@ -26,6 +26,10 @@ from app.config import get_settings
 from app.graph.builder import build_runtime_graph, create_runtime_initial_state
 from app.llm.factory import MissingLLMConfigurationError
 from app.observability import LLMTraceRecorder, default_run_log_dir
+from app.memory.store import (
+    SessionMemoryError,
+    open_redis_session_memory_store,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -49,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional front-end session ID. Redis keeps only this session's "
-            "latest workflow thread for 24 hours after its last activity."
+            "latest workflow thread for 24 hours and Session Memory for 72 "
+            "hours after their respective last activity."
         ),
     )
     parser.add_argument(
@@ -122,6 +127,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         initial_state = create_runtime_initial_state(
             args.goal,
             thread_id=args.thread_id,
+            session_id=args.session_id,
             enabled_tools=[] if args.disable_tools else None,
         )
         thread_id = initial_state["thread_id"]
@@ -160,7 +166,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     next_nodes: tuple[str, ...] = ()
     paused = False
     try:
-        _print_progress("开始阶段 9 外层工作流 Checkpoint")
+        _print_progress("开始阶段 10 Session Memory 与上下文压缩工作流")
         _print_progress(f"run_id={run_id}")
         _print_progress(f"thread_id={thread_id}")
         _print_progress(f"本次运行日志目录：{recorder.run_dir}")
@@ -174,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "--session-id 需要使用 Redis Checkpoint 后端。"
                 )
             registry_context = nullcontext(None)
+            memory_store_context = nullcontext(None)
             if args.session_id is not None:
                 assert settings.redis_url is not None
                 registry_context = open_redis_session_registry(
@@ -181,8 +188,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     checkpointer=checkpointer,
                     ttl_minutes=settings.checkpoint_ttl_minutes,
                 )
+                memory_store_context = open_redis_session_memory_store(
+                    settings.redis_url.get_secret_value(),
+                    ttl_hours=settings.session_memory_ttl_hours,
+                    max_items=settings.session_memory_max_items,
+                )
 
-            with registry_context as session_registry:
+            with registry_context as session_registry, memory_store_context as memory_store:
                 pause_after = (
                     "validate_plan" if args.checkpoint_demo else args.pause_after
                 )
@@ -192,6 +204,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     trace_recorder=recorder,
                     checkpointer=checkpointer,
                     interrupt_after=[pause_after] if pause_after else None,
+                    session_memory_store=memory_store,
                 )
                 session = CheckpointSession(graph=graph, thread_id=thread_id)
                 if args.resume is not None:
@@ -209,6 +222,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     state = session.resume()
                 else:
                     assert initial_state is not None
+                    if memory_store is not None:
+                        recalled_memory = memory_store.load(args.session_id)
+                        initial_state["memory_context"] = recalled_memory
+                        _print_progress(
+                            "Session Memory 已从 Redis 加载："
+                            f"session_id={args.session_id}，items={len(recalled_memory)}"
+                        )
                     if session_registry is None:
                         state = session.start(initial_state)
                     else:
@@ -263,7 +283,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         recorder.update_run_metadata({"status": "failed", "error": str(exc)})
         print(str(exc), file=sys.stderr)
         return 1
-    except (RedisCheckpointError, SessionCheckpointError) as exc:
+    except (RedisCheckpointError, SessionCheckpointError, SessionMemoryError) as exc:
         recorder.update_run_metadata({"status": "checkpoint_error", "error": str(exc)})
         print(str(exc), file=sys.stderr)
         return 4
@@ -300,6 +320,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     payload = {
         "run_id": state["run_id"],
         "thread_id": state["thread_id"],
+        "session_id": state["session_id"],
         "workflow_status": state["workflow_status"],
         "checkpoint_status": "paused" if paused else "completed",
         "next_nodes": list(next_nodes),
@@ -317,6 +338,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "total_steps": state["total_steps"],
         "retry_count": state["retry_count"],
         "replan_count": state["replan_count"],
+        "memory_context": [
+            item.model_dump(mode="json") for item in state["memory_context"]
+        ],
         "errors": state["errors"],
         "events": [event.model_dump(mode="json") for event in state["events"]],
         "final_output": state["final_output"],

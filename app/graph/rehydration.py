@@ -57,6 +57,10 @@ def rehydrate_stage6_state(state: Mapping[str, Any]) -> Stage6State:
     """Restore Pydantic contracts flattened by Redis JSON serialization."""
 
     restored = dict(state)
+    restored.setdefault(
+        "session_id",
+        restored.get("thread_id") or restored.get("run_id") or "legacy-session",
+    )
     restored["budget"] = _model(ExecutionBudget, restored.get("budget"))
     restored["tasks"] = _model_list(TaskSpec, restored.get("tasks"))
     restored["agent_specs"] = _model_list(

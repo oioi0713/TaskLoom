@@ -38,6 +38,7 @@ class WorkerResult(BaseModel):
         "invalid_output",
         "permission_denied",
         "budget_exhausted",
+        "context_exhausted",
     ]
     output_contract: OutputContractName
     output: dict[str, Any] | None = None

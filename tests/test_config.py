@@ -14,6 +14,9 @@ def test_settings_have_safe_development_defaults() -> None:
     assert settings.checkpoint_backend == "memory"
     assert settings.redis_url is None
     assert settings.checkpoint_ttl_minutes == 1440
+    assert settings.session_memory_ttl_hours == 72
+    assert settings.session_memory_max_items == 50
+    assert settings.llm_context_window_tokens == 32768
 
 
 def test_settings_read_prefixed_environment_variables(monkeypatch: pytest.MonkeyPatch) -> None:

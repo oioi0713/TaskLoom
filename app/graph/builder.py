@@ -43,6 +43,7 @@ from app.graph.routes import (
 )
 from app.graph.state import Stage3State, Stage6State, WorkflowEvent
 from app.llm.factory import create_chat_model
+from app.memory.consolidator import consolidate_state_memory
 from app.observability import LLMTraceRecorder
 from app.progress import run_with_heartbeat
 from app.tools.registry import TOOL_REGISTRY
@@ -97,6 +98,7 @@ def create_initial_state(goal: str) -> Stage3State:
     return {
         "run_id": str(uuid4()),
         "thread_id": "stage-3-demo",
+        "session_id": "stage-3-demo",
         "user_id": "local-user",
         "original_goal": goal,
         "clarified_goal": goal,
@@ -143,6 +145,7 @@ def build_runtime_graph(
     checkpointer: Any | None = None,
     interrupt_before: list[str] | None = None,
     interrupt_after: list[str] | None = None,
+    session_memory_store: Any | None = None,
 ) -> Any:
     """Compile the real workflow with Worker loops and optional checkpoints."""
 
@@ -164,6 +167,8 @@ def build_runtime_graph(
                 max_output_tokens=resolved.llm_worker_max_output_tokens,
                 trace_recorder=trace_recorder,
                 model_name=resolved.llm_model,
+                context_window_tokens=resolved.llm_context_window_tokens,
+                context_safety_margin_tokens=resolved.context_safety_margin_tokens,
             )
         if reviewer is None:
             reviewer = ReviewerAgent.from_chat_model(
@@ -263,6 +268,19 @@ def build_runtime_graph(
             )
             update = build_runtime_review_update(state, decision)
         decision = update.get("reviewer_decision")
+        if decision is not None and decision.action in {"finish", "replan", "fail"}:
+            memory_context = consolidate_state_memory(
+                state,
+                decision,
+                max_items=(settings.session_memory_max_items if settings else 50),
+            )
+            update["memory_context"] = memory_context
+            if session_memory_store is not None:
+                session_memory_store.save(state["session_id"], memory_context)
+                emit(
+                    "Session Memory 已写入 Redis："
+                    f"session_id={state['session_id']}，items={len(memory_context)}"
+                )
         emit(
             "Reviewer 结束："
             + (decision.action if decision is not None else "unknown")
@@ -315,7 +333,7 @@ def build_runtime_graph(
         checkpointer=checkpointer,
         interrupt_before=interrupt_before,
         interrupt_after=interrupt_after,
-        name="taskloom-stage-9-runtime",
+        name="taskloom-stage-10-runtime",
     )
 
 
@@ -323,6 +341,7 @@ def create_runtime_initial_state(
     goal: str,
     *,
     thread_id: str | None = None,
+    session_id: str | None = None,
     budget: ExecutionBudget | None = None,
     user_allowed_tools: list[str] | None = None,
     enabled_tools: list[str] | None = None,
@@ -330,9 +349,11 @@ def create_runtime_initial_state(
     """Create a complete state for one checkpointable runtime workflow."""
 
     run_id = str(uuid4())
+    resolved_thread_id = thread_id or run_id
     return {
         "run_id": run_id,
-        "thread_id": thread_id or run_id,
+        "thread_id": resolved_thread_id,
+        "session_id": session_id or resolved_thread_id,
         "user_id": "local-user",
         "original_goal": goal,
         "clarified_goal": goal,
@@ -390,6 +411,7 @@ def run_runtime_workflow(
             progress=progress,
             trace_recorder=trace_recorder,
             checkpointer=checkpointer,
+            session_memory_store=None,
         )
         initial_state = create_runtime_initial_state(goal)
         return CheckpointSession(

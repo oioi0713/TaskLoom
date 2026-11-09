@@ -176,7 +176,20 @@ def test_checkpoint_threads_are_unique_by_default() -> None:
 
     assert first["thread_id"] == first["run_id"]
     assert second["thread_id"] == second["run_id"]
+    assert first["session_id"] == first["thread_id"]
+    assert second["session_id"] == second["thread_id"]
     assert first["thread_id"] != second["thread_id"]
+
+
+def test_explicit_session_id_is_preserved_across_a_new_thread() -> None:
+    state = create_runtime_initial_state(
+        "session-scoped memory",
+        thread_id="thread-2",
+        session_id="chat-1",
+    )
+
+    assert state["thread_id"] == "thread-2"
+    assert state["session_id"] == "chat-1"
 
 
 def test_checkpoint_session_rejects_mismatched_initial_state() -> None:

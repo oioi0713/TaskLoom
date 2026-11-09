@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     checkpoint_backend: Literal["memory", "redis"] = "memory"
     redis_url: SecretStr | None = None
     checkpoint_ttl_minutes: int = Field(default=1440, ge=1)
+    session_memory_ttl_hours: int = Field(default=72, ge=1)
+    session_memory_max_items: int = Field(default=50, ge=1, le=500)
+    llm_context_window_tokens: int = Field(default=32768, ge=4096)
+    context_safety_margin_tokens: int = Field(default=1024, ge=0)
 
     @field_validator("llm_model", mode="before")
     @classmethod

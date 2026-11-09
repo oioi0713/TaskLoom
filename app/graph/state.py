@@ -30,6 +30,7 @@ class AgentState(TypedDict):
 
     run_id: str
     thread_id: str
+    session_id: str
     user_id: str
     original_goal: str
     clarified_goal: str

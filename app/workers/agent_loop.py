@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.contracts.output_registry import validate_output
 from app.contracts.result import ToolCallRecord
+from app.memory.compression import ContextCompressor
 from app.observability import LLMTraceRecorder
 from app.progress import run_with_heartbeat
 from app.tools.runtime import ToolRuntime
@@ -31,6 +32,7 @@ WorkerLoopStatus = Literal[
     "budget_exhausted",
     "permission_denied",
     "invalid_output",
+    "context_exhausted",
 ]
 
 
@@ -104,6 +106,10 @@ def run_worker_agent_loop(
     structured_model: Any,
     tool_runtime: ToolRuntime,
     max_output_tokens: int,
+    context_window_tokens: int = 32768,
+    context_safety_margin_tokens: int = 1024,
+    tool_schema_tokens: int = 0,
+    summary_model: Any | None = None,
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
     model_name: str | None = None,
@@ -112,6 +118,12 @@ def run_worker_agent_loop(
 
     started = time.perf_counter()
     granted_tools = frozenset(context.spec.granted_tools)
+    compressor = ContextCompressor(
+        context_window_tokens=context_window_tokens,
+        reserved_output_tokens=max_output_tokens,
+        tool_schema_tokens=tool_schema_tokens,
+        safety_margin_tokens=context_safety_margin_tokens,
+    )
 
     def elapsed_seconds() -> float:
         return time.perf_counter() - started
@@ -155,7 +167,71 @@ def run_worker_agent_loop(
         step = state["step_count"] + 1
         if progress is not None:
             progress(f"Agent Loop 第 {step}/{context.spec.max_steps} 步：LLM 决策")
-        messages = list(state["messages"])
+        compression_usage = 0
+
+        def summarize(old_messages: list[BaseMessage], emergency: bool) -> str:
+            nonlocal compression_usage
+            if summary_model is None:
+                return ""
+            prompt = [
+                HumanMessage(
+                    content=(
+                        "Compress the following earlier Worker context into a "
+                        "brief structured summary. Preserve verified facts, sources, "
+                        "decisions, failed attempts, unresolved questions, and the "
+                        "next action. Do not add facts. "
+                        + ("Use the smallest possible form. " if emergency else "")
+                        + "\n\n"
+                        + "\n".join(
+                            f"[{message.type}] {str(message.content)[:2000]}"
+                            for message in old_messages
+                        )
+                    )
+                )
+            ]
+            summary_call_id = trace_request(
+                "worker_context_summary",
+                prompt,
+                step,
+            )
+            try:
+                response = run_with_heartbeat(
+                    lambda: summary_model.invoke(prompt),
+                    progress=progress,
+                    label="上下文摘要 LLM 请求",
+                )
+            except Exception as exc:
+                if trace_recorder is not None and summary_call_id is not None:
+                    trace_recorder.record_error(summary_call_id, exc)
+                raise
+            if trace_recorder is not None and summary_call_id is not None:
+                trace_recorder.record_response(summary_call_id, response)
+            compression_usage += _extract_token_usage(response)
+            content = getattr(response, "content", "")
+            return content if isinstance(content, str) else json.dumps(
+                content, ensure_ascii=False, default=str
+            )
+
+        compression = compressor.compress(
+            list(state["messages"]),
+            summarizer=summarize,
+        )
+        if compression.changed and progress is not None:
+            progress(
+                "上下文压缩完成："
+                f"layer={compression.layer}，"
+                f"tokens≈{compression.original_tokens}->{compression.final_tokens}"
+            )
+        if compression.context_exhausted:
+            return {
+                "status": "context_exhausted",
+                "error": (
+                    "Worker context still exceeds usable input capacity after "
+                    "emergency compression."
+                ),
+                "token_usage": state["token_usage"] + compression_usage,
+            }
+        messages = compression.messages
         call_id = trace_request("worker_agent", messages, step)
         try:
             response = run_with_heartbeat(
@@ -171,7 +247,7 @@ def run_worker_agent_loop(
             update: dict[str, Any] = {
                 "messages": [response],
                 "step_count": step,
-                "token_usage": state["token_usage"] + usage,
+                "token_usage": state["token_usage"] + compression_usage + usage,
             }
             if elapsed_seconds() >= context.spec.timeout_seconds:
                 update.update(
@@ -367,7 +443,7 @@ def run_worker_agent_loop(
                 "error": f"Worker exceeded timeout_seconds={context.spec.timeout_seconds}.",
             }
         attempt = state["validation_attempts"] + 1
-        messages = [
+        finalizer_messages = [
             *state["messages"],
             HumanMessage(
                 content=(
@@ -377,6 +453,16 @@ def run_worker_agent_loop(
                 )
             ),
         ]
+        compression = compressor.compress(finalizer_messages)
+        if compression.context_exhausted:
+            return {
+                "status": "context_exhausted",
+                "error": (
+                    "Worker finalizer context exceeds usable input capacity after "
+                    "emergency compression."
+                ),
+            }
+        messages = compression.messages
         if progress is not None:
             progress(
                 "Agent Loop 已结束：生成并校验最终结构化输出"
