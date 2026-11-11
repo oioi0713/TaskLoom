@@ -152,6 +152,9 @@ def test_worker_prompt_contains_only_bounded_context_and_granted_tools() -> None
     assert "API Key" not in combined
     assert "整段主会话" not in combined
     assert "granted tool is optional permission" in combined
+    assert "can be answered reliably from stable general knowledge" in combined
+    assert "do not call a tool" in combined
+    assert "ordinary low-risk food and daily-life questions" in combined
     assert "Finalizer" in combined
 
 

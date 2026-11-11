@@ -13,6 +13,8 @@ from app.contracts.output_models import ReportResult
 from app.contracts.review import ReviewerDecision, ReviewerInput
 from app.graph.state import Stage3State, Stage6State, WorkflowEvent
 from app.observability import LLMTraceRecorder
+from app.progress import invoke_model_cancellable
+from app.runtime_control import RunControl
 
 
 class ReviewGenerationError(RuntimeError):
@@ -82,7 +84,12 @@ class ReviewerAgent:
             max_output_tokens=max_output_tokens,
         )
 
-    def review(self, review_input: ReviewerInput) -> ReviewerDecision:
+    def review(
+        self,
+        review_input: ReviewerInput,
+        *,
+        execution_control: RunControl | None = None,
+    ) -> ReviewerDecision:
         """Return one structurally valid decision, retrying format once."""
 
         messages = build_reviewer_messages(review_input)
@@ -100,7 +107,12 @@ class ReviewerAgent:
                 else None
             )
             try:
-                raw_decision = self._structured_model.invoke(messages)
+                raw_decision = invoke_model_cancellable(
+                    self._structured_model,
+                    messages,
+                    execution_control=execution_control,
+                    operation_name="reviewer",
+                )
             except Exception as exc:
                 if self._trace_recorder is not None and call_id is not None:
                     self._trace_recorder.record_error(call_id, exc)

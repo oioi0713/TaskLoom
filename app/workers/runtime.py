@@ -10,6 +10,7 @@ from typing import Any
 
 from app.contracts.result import WorkerResult
 from app.graph.state import RuntimeWorkerInput, WorkerInput, WorkflowEvent
+from app.runtime_control import RunControl
 from app.workers.context import RuntimeContext
 from app.workers.factory import WorkerFactory
 
@@ -233,9 +234,15 @@ class WorkerFactoryRuntime:
         factory: WorkerFactory,
         *,
         progress: Callable[[str], None] | None = None,
+        execution_control: RunControl | None = None,
+        checkpointer: Any | None = None,
+        checkpoint_registry: Any | None = None,
     ) -> None:
         self.factory = factory
         self.progress = progress
+        self.execution_control = execution_control
+        self.checkpointer = checkpointer
+        self.checkpoint_registry = checkpoint_registry
 
     def execute(self, worker_input: RuntimeWorkerInput) -> dict:
         """Create, run, and release one real isolated Worker."""
@@ -256,12 +263,24 @@ class WorkerFactoryRuntime:
                 review_feedback=worker_input["review_feedback"],
             ),
         )
+        child_thread_id = (
+            f"{worker_input['thread_id']}:worker:"
+            f"v{worker_input['plan_version']}:"
+            f"{task.task_id}:r{task.retry_count}"
+        )
+        if self.checkpoint_registry is not None:
+            self.checkpoint_registry.register_child_thread(
+                worker_input["thread_id"], child_thread_id
+            )
         result = worker.execute(
             progress=(
                 (lambda message: self.progress(f"Worker {task.task_id}：{message}"))
                 if self.progress is not None
                 else None
-            )
+            ),
+            execution_control=self.execution_control,
+            checkpointer=self.checkpointer,
+            checkpoint_thread_id=child_thread_id,
         )
         if self.progress is not None:
             self.progress(

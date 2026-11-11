@@ -29,6 +29,7 @@ class RedisSessionRegistry:
     checkpointer: Any
     ttl_minutes: int = 1440
     key_prefix: str = "taskloom:session"
+    child_key_prefix: str = "taskloom:checkpoint-children"
 
     @property
     def ttl_seconds(self) -> int:
@@ -53,8 +54,29 @@ class RedisSessionRegistry:
         old_value, _ = pipeline.execute()
         old_thread_id = _decode(old_value)
         if old_thread_id and old_thread_id != normalized_thread_id:
-            self.checkpointer.delete_thread(old_thread_id)
+            self.delete_thread_tree(old_thread_id)
         return old_thread_id
+
+    def register_child_thread(self, parent_thread_id: str, child_thread_id: str) -> None:
+        """Track Worker checkpoint threads so parent replacement cleans them too."""
+
+        key = f"{self.child_key_prefix}:{parent_thread_id}"
+        pipeline = self.client.pipeline(transaction=True)
+        pipeline.sadd(key, child_thread_id)
+        pipeline.expire(key, self.ttl_seconds)
+        pipeline.execute()
+
+    def delete_thread_tree(self, parent_thread_id: str) -> None:
+        """Delete one outer thread and every registered Worker checkpoint thread."""
+
+        key = f"{self.child_key_prefix}:{parent_thread_id}"
+        raw_children = self.client.smembers(key)
+        for raw_child in raw_children:
+            child_thread_id = _decode(raw_child)
+            if child_thread_id:
+                self.checkpointer.delete_thread(child_thread_id)
+        self.checkpointer.delete_thread(parent_thread_id)
+        self.client.delete(key)
 
     def resolve_latest(self, session_id: str) -> str | None:
         """Return and refresh the latest thread pointer for one session."""

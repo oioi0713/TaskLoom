@@ -205,6 +205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     checkpointer=checkpointer,
                     interrupt_after=[pause_after] if pause_after else None,
                     session_memory_store=memory_store,
+                    checkpoint_registry=session_registry,
                 )
                 session = CheckpointSession(graph=graph, thread_id=thread_id)
                 if args.resume is not None:

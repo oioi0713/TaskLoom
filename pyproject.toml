@@ -16,12 +16,15 @@ dependencies = [
     "pydantic>=2.12,<3.0",
     "pydantic-settings>=2.11,<3.0",
     "python-dotenv>=1.1,<2.0",
+    "fastapi>=0.118,<1.0",
+    "uvicorn[standard]>=0.37,<1.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.4,<10.0",
     "pytest-asyncio>=1.2,<2.0",
+    "httpx>=0.28,<1.0",
 ]
 
 [project.scripts]
@@ -29,6 +32,7 @@ taskloom = "app.main:main"
 taskloom-plan = "app.agents.planner_cli:main"
 taskloom-worker = "app.workers.worker_cli:main"
 taskloom-run = "app.graph.runtime_cli:main"
+taskloom-web = "app.api.server:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]

@@ -6,6 +6,7 @@ import json
 import operator
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -19,7 +20,8 @@ from app.contracts.output_registry import validate_output
 from app.contracts.result import ToolCallRecord
 from app.memory.compression import ContextCompressor
 from app.observability import LLMTraceRecorder
-from app.progress import run_with_heartbeat
+from app.progress import invoke_model_cancellable, run_with_heartbeat
+from app.runtime_control import RunControl, RunControlError
 from app.tools.runtime import ToolRuntime
 from app.workers.context import WorkerExecutionContext
 
@@ -113,6 +115,9 @@ def run_worker_agent_loop(
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
     model_name: str | None = None,
+    execution_control: RunControl | None = None,
+    checkpointer: Any | None = None,
+    checkpoint_thread_id: str | None = None,
 ) -> WorkerLoopOutcome:
     """Compile and run one fixed Worker Agent Loop with isolated state."""
 
@@ -127,6 +132,11 @@ def run_worker_agent_loop(
 
     def elapsed_seconds() -> float:
         return time.perf_counter() - started
+
+    def controlled_operation(kind: str, name: str):
+        if execution_control is None:
+            return nullcontext()
+        return execution_control.operation(kind, name)  # type: ignore[arg-type]
 
     def budget_error(state: WorkerAgentState) -> tuple[WorkerLoopStatus, str] | None:
         if elapsed_seconds() >= context.spec.timeout_seconds:
@@ -196,7 +206,12 @@ def run_worker_agent_loop(
             )
             try:
                 response = run_with_heartbeat(
-                    lambda: summary_model.invoke(prompt),
+                    lambda: invoke_model_cancellable(
+                        summary_model,
+                        prompt,
+                        execution_control=execution_control,
+                        operation_name=f"worker-summary:{context.task.task_id}",
+                    ),
                     progress=progress,
                     label="上下文摘要 LLM 请求",
                 )
@@ -235,7 +250,12 @@ def run_worker_agent_loop(
         call_id = trace_request("worker_agent", messages, step)
         try:
             response = run_with_heartbeat(
-                lambda: loop_model.invoke(messages),
+                lambda: invoke_model_cancellable(
+                    loop_model,
+                    messages,
+                    execution_control=execution_control,
+                    operation_name=f"worker-agent:{context.task.task_id}",
+                ),
                 progress=progress,
                 label="Agent Loop LLM 请求",
             )
@@ -257,6 +277,8 @@ def run_worker_agent_loop(
                     ),
                 )
             return update
+        except RunControlError:
+            raise
         except TimeoutError as exc:
             if trace_recorder is not None and call_id is not None:
                 trace_recorder.record_error(call_id, exc)
@@ -378,7 +400,12 @@ def run_worker_agent_loop(
 
             if progress is not None:
                 progress(f"调用工具 {name}，call_id={call_id}")
-            execution = tool_runtime.execute(name, arguments)
+            with (
+                execution_control.operation("tool", name, pause_after=False)
+                if execution_control is not None
+                else nullcontext()
+            ):
+                execution = tool_runtime.execute(name, arguments)
             observation = {
                 **execution.observation,
                 "tool_name": name,
@@ -436,6 +463,13 @@ def run_worker_agent_loop(
             progress("Tool Observation 已写回私有上下文，继续由 LLM 判断")
         return {}
 
+    def pause_after_tool(state: WorkerAgentState) -> dict[str, Any]:
+        """Pause only after the completed Tool result has been checkpointed."""
+
+        if execution_control is not None:
+            execution_control.safe_point()
+        return {}
+
     def validate_worker_output(state: WorkerAgentState) -> dict[str, Any]:
         if elapsed_seconds() >= context.spec.timeout_seconds:
             return {
@@ -472,7 +506,12 @@ def run_worker_agent_loop(
         response_recorded = False
         try:
             raw_output = run_with_heartbeat(
-                lambda: structured_model.invoke(messages),
+                lambda: invoke_model_cancellable(
+                    structured_model,
+                    messages,
+                    execution_control=execution_control,
+                    operation_name=f"worker-finalizer:{context.task.task_id}",
+                ),
                 progress=progress,
                 label="最终结构化输出 LLM 请求",
             )
@@ -526,6 +565,8 @@ def run_worker_agent_loop(
                 ),
             )
             return update
+        except RunControlError:
+            raise
         except TimeoutError as exc:
             if trace_recorder is not None and call_id is not None:
                 trace_recorder.record_error(call_id, exc)
@@ -544,6 +585,7 @@ def run_worker_agent_loop(
     builder = StateGraph(WorkerAgentState)
     builder.add_node("worker_llm", worker_llm)
     builder.add_node("authorized_tool", authorized_tool_node)
+    builder.add_node("pause_after_tool", pause_after_tool)
     builder.add_node("record_observation", record_observation)
     builder.add_node("validate_worker_output", validate_worker_output)
     builder.add_edge(START, "worker_llm")
@@ -552,7 +594,8 @@ def run_worker_agent_loop(
         route_worker_action,
         {"tool": "authorized_tool", "validate": "validate_worker_output", "end": END},
     )
-    builder.add_edge("authorized_tool", "record_observation")
+    builder.add_edge("authorized_tool", "pause_after_tool")
+    builder.add_edge("pause_after_tool", "record_observation")
     builder.add_conditional_edges(
         "record_observation",
         lambda state: "continue" if state["status"] == "running" else "end",
@@ -563,9 +606,11 @@ def run_worker_agent_loop(
         route_after_validation,
         {"retry": "validate_worker_output", "end": END},
     )
-    graph = builder.compile(name="taskloom-worker-agent-loop")
-    final_state = graph.invoke(
-        {
+    graph = builder.compile(
+        checkpointer=checkpointer,
+        name="taskloom-worker-agent-loop",
+    )
+    initial_state: WorkerAgentState = {
             "messages": initial_messages,
             "step_count": 0,
             "token_usage": 0,
@@ -577,9 +622,21 @@ def run_worker_agent_loop(
             "last_tool_signature": None,
             "tool_call_counts": {},
             "permission_denials": 0,
-        },
-        config={"recursion_limit": max(20, context.spec.max_steps * 4)},
-    )
+        }
+    config: dict[str, Any] = {
+        "recursion_limit": max(20, context.spec.max_steps * 5)
+    }
+    graph_input: WorkerAgentState | None = initial_state
+    if checkpointer is not None:
+        if not checkpoint_thread_id:
+            raise ValueError(
+                "checkpoint_thread_id is required when the Worker uses a checkpointer."
+            )
+        config["configurable"] = {"thread_id": checkpoint_thread_id}
+        snapshot = graph.get_state(config)
+        if snapshot.values:
+            graph_input = None
+    final_state = graph.invoke(graph_input, config=config)
     return WorkerLoopOutcome(
         status=final_state["status"],
         output=final_state["final_output"],

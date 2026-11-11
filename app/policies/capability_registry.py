@@ -6,6 +6,7 @@ from typing import Mapping
 
 CAPABILITY_REGISTRY: frozenset[str] = frozenset(
     {
+        "direct_answer",
         "web_research",
         "document_analysis",
         "technical_analysis",
@@ -18,6 +19,7 @@ CAPABILITY_REGISTRY: frozenset[str] = frozenset(
 
 CAPABILITY_TOOL_MAP: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        "direct_answer": frozenset(),
         "web_research": frozenset({"web_search", "web_page_reader"}),
         "document_analysis": frozenset({"knowledge_search", "document_reader"}),
         "technical_analysis": frozenset({"python_sandbox"}),

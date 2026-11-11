@@ -10,6 +10,7 @@ from app.tools.registry import TOOL_REGISTRY
 
 
 def test_expected_registry_entries_exist() -> None:
+    assert "direct_answer" in CAPABILITY_REGISTRY
     assert "web_research" in CAPABILITY_REGISTRY
     assert "web_search" in TOOL_REGISTRY
     assert "research_result_v1" in OUTPUT_CONTRACTS
@@ -18,6 +19,7 @@ def test_expected_registry_entries_exist() -> None:
 
 
 def test_capability_tool_mapping_is_bounded() -> None:
+    assert allowed_tools_for(["direct_answer"]) == frozenset()
     assert allowed_tools_for(["web_research"]) == frozenset(
         {"web_search", "web_page_reader"}
     )

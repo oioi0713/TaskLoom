@@ -1,8 +1,12 @@
+import asyncio
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from app.progress import run_with_heartbeat
+from app.progress import invoke_model_cancellable, run_with_heartbeat
+from app.runtime_control import RunControl, RunPaused
 
 
 def test_run_with_heartbeat_reports_while_operation_is_blocked() -> None:
@@ -27,3 +31,33 @@ def test_run_with_heartbeat_rejects_non_positive_interval() -> None:
             label="test",
             interval_seconds=0,
         )
+
+
+def test_cancellable_async_model_request_stops_on_pause() -> None:
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    class AsyncModel:
+        async def ainvoke(self, messages):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    control = RunControl()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            invoke_model_cancellable,
+            AsyncModel(),
+            ["prompt"],
+            execution_control=control,
+            operation_name="test-llm",
+        )
+        assert started.wait(timeout=1)
+        control.request_pause()
+        with pytest.raises(RunPaused):
+            future.result(timeout=1)
+
+    assert cancelled.is_set()

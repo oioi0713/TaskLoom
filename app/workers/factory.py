@@ -22,7 +22,8 @@ from app.graph.rehydration import rehydrate_tool_call_records
 from app.llm.factory import create_chat_model
 from app.memory.compression import estimate_text_tokens
 from app.observability import LLMTraceRecorder
-from app.progress import run_with_heartbeat
+from app.progress import invoke_model_cancellable, run_with_heartbeat
+from app.runtime_control import RunControl, RunControlError
 from app.tools.registry import TOOL_REGISTRY
 from app.tools.runtime import ToolRuntime, create_default_tool_runtime
 from app.workers.agent_loop import run_worker_agent_loop
@@ -42,6 +43,7 @@ class WorkerLifecycleError(RuntimeError):
 
 
 _TEMPLATE_BY_CAPABILITY = {
+    "direct_answer": "general",
     "web_research": "research",
     "document_analysis": "research",
     "technical_analysis": "analysis",
@@ -165,6 +167,21 @@ def _build_messages(
     granted_names = {tool.name for tool in context.granted_tools}
     termination_lines = [
         "- A granted tool is optional permission, not a checklist.",
+        (
+            "- Before every tool call, ask whether the current task can be answered "
+            "reliably from stable general knowledge and the supplied context. If yes, "
+            "do not call a tool; answer directly and end the loop."
+        ),
+        (
+            "- Use a tool only when external evidence is actually needed, such as "
+            "fresh or changing information, an explicit request to search or cite "
+            "sources, a named file or URL, repository inspection, or computation."
+        ),
+        (
+            "- Treat ordinary low-risk food and daily-life questions as direct-answer "
+            "tasks unless they involve symptoms, diagnosis, medication interactions, "
+            "allergies, poisoning, or an emergency."
+        ),
         "- Do not repeat a successful tool call merely to confirm the same evidence.",
         (
             "- Missing fields must be reported as 'not specified in the source'; do "
@@ -308,6 +325,9 @@ class IsolatedWorker:
         self,
         *,
         progress: Callable[[str], None] | None = None,
+        execution_control: RunControl | None = None,
+        checkpointer: Any | None = None,
+        checkpoint_thread_id: str | None = None,
     ) -> WorkerResult:
         """Invoke once, validate output, return an audit envelope, then release."""
 
@@ -335,12 +355,17 @@ class IsolatedWorker:
                     progress=progress,
                     trace_recorder=self._trace_recorder,
                     model_name=self._model_name,
+                    execution_control=execution_control,
+                    checkpointer=checkpointer,
+                    checkpoint_thread_id=checkpoint_thread_id,
                 )
                 output = outcome.output
                 status = outcome.status
                 error = outcome.error
                 token_usage = outcome.token_usage
                 tool_calls = rehydrate_tool_call_records(outcome.tool_calls)
+            except RunControlError:
+                raise
             except Exception as exc:
                 output = None
                 status = "failed"
@@ -391,7 +416,12 @@ class IsolatedWorker:
                 try:
                     try:
                         raw_output = run_with_heartbeat(
-                            lambda: self._structured_model.invoke(attempt_messages),
+                            lambda: invoke_model_cancellable(
+                                self._structured_model,
+                                attempt_messages,
+                                execution_control=execution_control,
+                                operation_name=f"worker:{context.task.task_id}",
+                            ),
                             progress=progress,
                             label="LLM 请求",
                         )
@@ -452,6 +482,8 @@ class IsolatedWorker:
                     if progress is not None:
                         progress("第二次结构化输出仍不合法")
                     break
+        except RunControlError:
+            raise
         except TimeoutError as exc:
             output = None
             status = "timeout"

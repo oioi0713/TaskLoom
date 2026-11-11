@@ -82,6 +82,8 @@ class RuntimeWorkerInput(TypedDict):
     """Minimal input sent to one real short-lived Worker invocation."""
 
     run_id: str
+    thread_id: str
+    plan_version: int
     task: TaskSpec
     spec: ResolvedSubAgentSpec
     dependency_results: list[WorkerResult]

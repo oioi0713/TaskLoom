@@ -24,6 +24,8 @@ from app.llm.factory import create_chat_model
 from app.observability import LLMTraceRecorder
 from app.planning.validator import PlanGuard
 from app.policies.capability_registry import CAPABILITY_REGISTRY, CAPABILITY_TOOL_MAP
+from app.progress import invoke_model_cancellable
+from app.runtime_control import RunControl
 from app.tools.registry import TOOL_REGISTRY
 
 
@@ -126,7 +128,12 @@ class PlannerAgent:
             max_output_tokens=max_output_tokens,
         )
 
-    def plan(self, planner_input: PlannerInput) -> ExecutionPlan:
+    def plan(
+        self,
+        planner_input: PlannerInput,
+        *,
+        execution_control: RunControl | None = None,
+    ) -> ExecutionPlan:
         """Generate at most two plans and return only a guarded executable plan."""
 
         messages = build_planner_messages(planner_input)
@@ -144,7 +151,12 @@ class PlannerAgent:
                 else None
             )
             try:
-                raw_plan = self._structured_model.invoke(messages)
+                raw_plan = invoke_model_cancellable(
+                    self._structured_model,
+                    messages,
+                    execution_control=execution_control,
+                    operation_name="planner",
+                )
             except (ValidationError, OutputParserException, ValueError) as exc:
                 if self._trace_recorder is not None and call_id is not None:
                     self._trace_recorder.record_error(call_id, exc)

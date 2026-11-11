@@ -26,3 +26,16 @@ Mandatory rules:
     request source-reading tools again.
 17. Do not make a Worker search for fields that the named source may legitimately omit.
     Instruct it to report "not specified in the source" and finish instead.
+18. For a simple, self-contained question that can be answered reliably from stable
+    general knowledge, create exactly one direct_answer Worker, request no tools, and
+    do not split the question into research and report-writing tasks.
+    Ordinary low-risk food and daily-life questions belong here when they do not
+    mention symptoms, diagnosis, medication interactions, allergies, poisoning, or
+    an emergency.
+19. Request tools only when the goal actually requires external evidence: fresh or
+    changing information, an explicit request to search or cite sources, a named file
+    or URL, repository inspection, or computation. Never request a tool merely to
+    confirm ordinary general knowledge.
+20. If external verification is prudent because the answer is genuinely
+    safety-sensitive, use the smallest sufficient research task. Do not create
+    redundant searches or a separate synthesis task for a short answer.

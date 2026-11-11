@@ -2,7 +2,7 @@
 
 TaskLoom 是一个基于 LangGraph 的受控多智能体任务编排项目。系统使用固定外层 Workflow 负责计划、依赖调度、并行执行、审核、重试和重新规划；每个短生命周期 Worker 在内部运行受权限约束的 `LLM → Tool → Observation → LLM` 自主循环。
 
-当前已完成阶段 0～10，包括真实 LLM Planner、动态 Worker、Reviewer 质量闭环、只读工具、Redis Checkpoint、Session 生命周期、Session Memory 和上下文压缩。
+当前已完成阶段 0～11，包括真实 LLM Planner、动态 Worker、Reviewer 质量闭环、只读工具、Redis Checkpoint、Session 生命周期、Session Memory、上下文压缩，以及 FastAPI/SSE Web 工作台和可控暂停恢复。
 
 ## 主要功能
 
@@ -15,7 +15,9 @@ TaskLoom 是一个基于 LangGraph 的受控多智能体任务编排项目。系
 - 同一 Session 只保留最新可恢复 Thread；
 - Session Memory 独立存入 Redis，不随旧 Thread Checkpoint 删除；
 - Worker 使用 50%/70%/90% 三级 Message 压缩；
-- 支持本地文档读取、项目知识搜索、网页搜索和网页读取工具。
+- 支持本地文档读取、项目知识搜索、网页搜索和网页读取工具；
+- Web 工作台支持多会话、SSE 实时进度、暂停、恢复、取消和同 Session 新 Query 替换旧运行；
+- LLM 请求可在暂停时取消并从 Checkpoint 重试，已启动的 Tool 完成并保存 Observation 后再暂停。
 
 ## 环境要求
 
@@ -85,6 +87,22 @@ python -m app.graph.runtime_cli `
 Session Memory 已从 Redis 加载：session_id=stage10-demo，items=...
 ```
 
+## Web 工作台
+
+启动本地 FastAPI 与前端页面：
+
+```powershell
+python -m app.api.server
+```
+
+然后访问：
+
+```text
+http://127.0.0.1:8000
+```
+
+当前页面支持创建和切换会话、提交 Query、通过 SSE 查看 Planner/Supervisor/Worker/Reviewer 进度、查看任务状态、Session Memory 数量和最终结果，并支持暂停、恢复和取消。LLM 运行时暂停会取消当前异步请求，恢复后从同一 Redis Checkpoint 重新发起该节点的请求；Tool 运行时暂停会等待当前 Tool 完成并保存 Observation，恢复后不会重复执行已经完成的 Tool。
+
 运行结束、失败或发生 Replan 时，系统会从目标、WorkerResult 和 ReviewerDecision 中提炼稳定事实、约束、建议和失败经验，再写回 Session Memory。完整原始消息和 Tool Observation 不会作为长期 Memory 保存。
 
 ## 暂停和恢复
@@ -110,7 +128,7 @@ python -m app.graph.runtime_cli `
   --no-print-json
 ```
 
-当前恢复粒度是外层 LangGraph 节点。正在执行的单次 LLM 或 Tool 调用尚不能从中间位置恢复。
+CLI 的 `--pause-before/--pause-after` 仍是外层 LangGraph 节点粒度。Web 工作台额外支持运行中控制：LLM 请求可以取消，但不能从已经生成的半截 Token 原地续传，恢复时会重新请求；Tool 不做强制中断，而是在当前调用完成、结果写入 Worker 子图 Checkpoint 后暂停。
 
 ## Worker 三级上下文压缩
 
@@ -133,10 +151,10 @@ python -m app.graph.runtime_cli `
 python -m pytest -q
 ```
 
-阶段 10 完成时的全量验证结果：
+阶段 11 完成时的全量验证结果：
 
 ```text
-152 passed
+162 passed
 ```
 
 ## 当前边界
@@ -145,4 +163,5 @@ python -m pytest -q
 - 不建设独立 Knowledge Store、向量数据库或 RAG 索引；
 - 不建设任务审计数据库；
 - 不开放任意 Shell、任意文件写入和其他高风险工具；
-- 前端、SSE、细粒度异步暂停和取消属于下一阶段。
+- Web Session、前端运行状态和 `pending_action` 当前保存在服务进程内；服务重启后不会自动重建页面运行记录，但 Redis 中的 Workflow Checkpoint 和 Session Memory 仍按各自 TTL 保存；
+- LLM 暂停采用“取消并重新发起请求”，不保存或恢复模型内部隐藏推理，也不会把半截结构化输出写入正式状态。

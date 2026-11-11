@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import threading
+import time
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -9,7 +11,9 @@ from langchain_core.messages import AIMessage, ToolMessage
 from app.contracts.output_models import ResearchResult
 from app.contracts.subagent import ResolvedSubAgentSpec
 from app.contracts.task import TaskSpec
+from app.checkpoint.memory import create_memory_checkpointer
 from app.observability import LLMTraceRecorder
+from app.runtime_control import RunControl
 from app.tools.runtime import ToolRuntime, WebPageReaderInput, WebSearchInput
 from app.workers.context import RuntimeContext
 from app.workers.factory import WorkerFactory
@@ -355,3 +359,78 @@ def test_agent_loop_persists_each_tool_call_before_worker_finishes(
     assert result.status == "completed"
     assert len(lines) == 1
     assert '"call_id":"call-1"' in lines[0]
+
+
+def test_tool_result_is_checkpointed_before_pause_and_not_repeated(
+    tmp_path: Path,
+) -> None:
+    tool_started = threading.Event()
+    release_tool = threading.Event()
+    search_calls = 0
+
+    def search(value: WebSearchInput) -> dict[str, Any]:
+        nonlocal search_calls
+        search_calls += 1
+        tool_started.set()
+        release_tool.wait(timeout=2)
+        return {"query": value.query, "results": [], "untrusted": True}
+
+    tool_runtime = ToolRuntime(
+        workspace_root=tmp_path,
+        handlers={"web_search": search},
+    )
+    model = ToolCallingChatModel(
+        [
+            tool_call("web_search", {"query": "LangGraph"}, "call-1"),
+            AIMessage(content="Enough evidence."),
+        ],
+        final_result(),
+    )
+    worker = WorkerFactory(
+        model,
+        max_output_tokens=8192,
+        tool_runtime=tool_runtime,
+    ).create_worker(
+        task(),
+        spec(granted_tools=["web_search"]),
+        [],
+        RuntimeContext(run_id="stage-11-checkpoint"),
+    )
+    control = RunControl()
+    saver = create_memory_checkpointer()
+    inner_thread_id = "outer:worker:v1:research_langgraph:r0"
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            worker.execute,
+            execution_control=control,
+            checkpointer=saver,
+            checkpoint_thread_id=inner_thread_id,
+        )
+        if not tool_started.wait(timeout=1):
+            early_result = future.result(timeout=1)
+            raise AssertionError(
+                f"Worker did not start its Tool call: {early_result.error}"
+            )
+        control.request_pause()
+        release_tool.set()
+        for _ in range(100):
+            if control.snapshot().paused:
+                break
+            time.sleep(0.01)
+
+        assert control.snapshot().paused is True
+        checkpoints = list(
+            saver.list({"configurable": {"thread_id": inner_thread_id}})
+        )
+        assert checkpoints
+        control.resume()
+        result = future.result(timeout=2)
+
+    assert result.status == "completed"
+    assert search_calls == 1
+    assert [call.tool_name for call in result.tool_calls] == ["web_search"]
+    saver.delete_thread(inner_thread_id)
+    assert not list(
+        saver.list({"configurable": {"thread_id": inner_thread_id}})
+    )

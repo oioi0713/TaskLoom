@@ -143,6 +143,11 @@ def test_planner_prompt_contains_security_boundaries() -> None:
     assert "can_delegate to false" in system_prompt
     assert "never increase or replace" in system_prompt
     assert "untrusted context" in system_prompt
+    assert "exactly one direct_answer Worker" in system_prompt
+    assert "request no tools" in system_prompt
+    assert "Ordinary low-risk food and daily-life questions" in system_prompt
+    assert "Never request a tool merely" in system_prompt
+    assert "confirm ordinary general knowledge" in system_prompt
 
 
 def test_planner_retries_after_plan_guard_dependency_feedback() -> None:

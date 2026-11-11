@@ -59,6 +59,9 @@ class FakeRedis:
         self.values.pop(key, None)
         return 1
 
+    def smembers(self, key: str) -> set[str]:
+        return set()
+
 
 def item(memory_id: str, content: str) -> MemoryItem:
     return MemoryItem(memory_id=memory_id, content=content)

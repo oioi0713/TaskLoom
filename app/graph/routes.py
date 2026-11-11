@@ -87,6 +87,8 @@ def route_runtime_supervisor(
                 "worker",
                 {
                     "run_id": state["run_id"],
+                    "thread_id": state["thread_id"],
+                    "plan_version": state["plan_version"],
                     "task": task,
                     "spec": spec,
                     "dependency_results": [

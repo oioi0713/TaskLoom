@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
@@ -46,6 +47,7 @@ from app.llm.factory import create_chat_model
 from app.memory.consolidator import consolidate_state_memory
 from app.observability import LLMTraceRecorder
 from app.progress import run_with_heartbeat
+from app.runtime_control import RunControl
 from app.tools.registry import TOOL_REGISTRY
 from app.tools.runtime import EXECUTABLE_TOOL_NAMES
 from app.workers.factory import WorkerFactory
@@ -146,6 +148,8 @@ def build_runtime_graph(
     interrupt_before: list[str] | None = None,
     interrupt_after: list[str] | None = None,
     session_memory_store: Any | None = None,
+    execution_control: RunControl | None = None,
+    checkpoint_registry: Any | None = None,
 ) -> Any:
     """Compile the real workflow with Worker loops and optional checkpoints."""
 
@@ -187,9 +191,25 @@ def build_runtime_graph(
         if progress is not None:
             progress(message)
 
-    worker_runtime = WorkerFactoryRuntime(worker_factory, progress=progress)
+    worker_runtime = WorkerFactoryRuntime(
+        worker_factory,
+        progress=progress,
+        execution_control=execution_control,
+        checkpointer=checkpointer,
+        checkpoint_registry=checkpoint_registry,
+    )
+
+    def safe_point() -> None:
+        if execution_control is not None:
+            execution_control.safe_point()
+
+    def controlled_operation(kind: str, name: str):
+        if execution_control is None:
+            return nullcontext()
+        return execution_control.operation(kind, name)  # type: ignore[arg-type]
 
     def real_planner_node(state: Stage6State) -> dict:
+        safe_point()
         emit("Planner 开始调用 LLM 生成 ExecutionPlan（格式错误时最多尝试两次）")
         budget = state["budget"]
         limits = PlannerLimits(
@@ -206,8 +226,17 @@ def build_runtime_graph(
             recalled_memory=state.get("memory_context", []),
             replan_constraints=state.get("replan_constraints", []),
         )
+        def call_planner():
+            if isinstance(planner, PlannerAgent):
+                return planner.plan(
+                    planner_input,
+                    execution_control=execution_control,
+                )
+            with controlled_operation("llm", "planner"):
+                return planner.plan(planner_input)
+
         plan = run_with_heartbeat(
-            lambda: planner.plan(planner_input),
+            call_planner,
             progress=progress,
             label="Planner LLM 请求",
         )
@@ -229,6 +258,7 @@ def build_runtime_graph(
         }
 
     def runtime_supervisor_with_progress(state: Stage6State) -> dict:
+        safe_point()
         emit(
             "Supervisor 开始调度，"
             f"当前 total_steps={state.get('total_steps', 0)}"
@@ -244,6 +274,7 @@ def build_runtime_graph(
         return update
 
     def aggregate_with_progress(state: Stage6State) -> dict:
+        safe_point()
         update = aggregate_runtime_node(state)
         statuses = ", ".join(
             f"{task.task_id}={task.status}" for task in update["tasks"]
@@ -256,13 +287,23 @@ def build_runtime_graph(
         return update
 
     def reviewer_with_progress(state: Stage6State) -> dict:
+        safe_point()
         emit("Reviewer 开始审核目标覆盖、结果质量和剩余预算")
         if state.get("execution_plan") is None or not state.get("tasks"):
             update = runtime_reviewer_node(state)
         else:
             review_input = build_runtime_reviewer_input(state)
+            def call_reviewer():
+                if isinstance(reviewer, ReviewerAgent):
+                    return reviewer.review(
+                        review_input,
+                        execution_control=execution_control,
+                    )
+                with controlled_operation("llm", "reviewer"):
+                    return reviewer.review(review_input)
+
             decision = run_with_heartbeat(
-                lambda: reviewer.review(review_input),
+                call_reviewer,
                 progress=progress,
                 label="Reviewer LLM 请求",
             )
@@ -276,6 +317,7 @@ def build_runtime_graph(
             )
             update["memory_context"] = memory_context
             if session_memory_store is not None:
+                safe_point()
                 session_memory_store.save(state["session_id"], memory_context)
                 emit(
                     "Session Memory 已写入 Redis："
@@ -340,6 +382,7 @@ def build_runtime_graph(
 def create_runtime_initial_state(
     goal: str,
     *,
+    run_id: str | None = None,
     thread_id: str | None = None,
     session_id: str | None = None,
     budget: ExecutionBudget | None = None,
@@ -348,10 +391,10 @@ def create_runtime_initial_state(
 ) -> Stage6State:
     """Create a complete state for one checkpointable runtime workflow."""
 
-    run_id = str(uuid4())
-    resolved_thread_id = thread_id or run_id
+    resolved_run_id = run_id or str(uuid4())
+    resolved_thread_id = thread_id or resolved_run_id
     return {
-        "run_id": run_id,
+        "run_id": resolved_run_id,
         "thread_id": resolved_thread_id,
         "session_id": session_id or resolved_thread_id,
         "user_id": "local-user",
@@ -390,31 +433,137 @@ def create_runtime_initial_state(
 def run_runtime_workflow(
     goal: str,
     *,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    thread_id: str | None = None,
     planner: PlannerAgent | Any | None = None,
     reviewer: ReviewerAgent | Any | None = None,
     worker_factory: WorkerFactory | None = None,
     settings: Settings | None = None,
     progress: Callable[[str], None] | None = None,
     trace_recorder: LLMTraceRecorder | None = None,
+    execution_control: RunControl | None = None,
 ) -> Stage6State:
     """Run the complete workflow with a process-local memory checkpointer."""
 
-    from app.checkpoint import CheckpointSession, open_checkpoint_saver
+    from contextlib import nullcontext
+
+    from app.checkpoint import (
+        CheckpointSession,
+        open_checkpoint_saver,
+        open_redis_session_registry,
+    )
+    from app.memory.store import open_redis_session_memory_store
 
     resolved_settings = settings or get_settings()
-    with open_checkpoint_saver(resolved_settings) as (_, checkpointer):
-        graph = build_runtime_graph(
-            planner=planner,
-            reviewer=reviewer,
-            worker_factory=worker_factory,
-            settings=resolved_settings,
-            progress=progress,
-            trace_recorder=trace_recorder,
+    with open_checkpoint_saver(resolved_settings) as (backend_name, checkpointer):
+        if session_id is not None and backend_name != "redis":
+            raise ValueError("session_id requires the Redis checkpoint backend")
+        registry_context = nullcontext(None)
+        memory_context = nullcontext(None)
+        if session_id is not None:
+            assert resolved_settings.redis_url is not None
+            redis_url = resolved_settings.redis_url.get_secret_value()
+            registry_context = open_redis_session_registry(
+                redis_url,
+                checkpointer=checkpointer,
+                ttl_minutes=resolved_settings.checkpoint_ttl_minutes,
+            )
+            memory_context = open_redis_session_memory_store(
+                redis_url,
+                ttl_hours=resolved_settings.session_memory_ttl_hours,
+                max_items=resolved_settings.session_memory_max_items,
+            )
+        with registry_context as registry, memory_context as memory_store:
+            initial_state = create_runtime_initial_state(
+                goal,
+                run_id=run_id,
+                thread_id=thread_id,
+                session_id=session_id,
+            )
+            if memory_store is not None:
+                initial_state["memory_context"] = memory_store.load(session_id)
+            graph = build_runtime_graph(
+                planner=planner,
+                reviewer=reviewer,
+                worker_factory=worker_factory,
+                settings=resolved_settings,
+                progress=progress,
+                trace_recorder=trace_recorder,
+                checkpointer=checkpointer,
+                session_memory_store=memory_store,
+                execution_control=execution_control,
+                checkpoint_registry=registry,
+            )
+            checkpoint_session = CheckpointSession(
+                graph=graph,
+                thread_id=initial_state["thread_id"],
+            )
+            if registry is None:
+                if execution_control is not None:
+                    execution_control.safe_point()
+                return checkpoint_session.start(initial_state)
+            checkpoint_session.initialize(initial_state)
+            if execution_control is not None:
+                execution_control.safe_point()
+            registry.activate(session_id, initial_state["thread_id"])
+            return checkpoint_session.resume()
+
+
+def resume_runtime_workflow(
+    *,
+    thread_id: str,
+    session_id: str,
+    planner: PlannerAgent | Any | None = None,
+    reviewer: ReviewerAgent | Any | None = None,
+    worker_factory: WorkerFactory | None = None,
+    settings: Settings | None = None,
+    progress: Callable[[str], None] | None = None,
+    trace_recorder: LLMTraceRecorder | None = None,
+    execution_control: RunControl | None = None,
+) -> Stage6State:
+    """Resume an existing Redis workflow after a cancellable Web pause."""
+
+    from app.checkpoint import (
+        CheckpointSession,
+        RedisCheckpointError,
+        open_checkpoint_saver,
+        open_redis_session_registry,
+    )
+    from app.memory.store import open_redis_session_memory_store
+
+    resolved_settings = settings or get_settings()
+    with open_checkpoint_saver(resolved_settings) as (backend_name, checkpointer):
+        if backend_name != "redis":
+            raise RedisCheckpointError("Web Checkpoint 恢复需要 Redis 后端。")
+        assert resolved_settings.redis_url is not None
+        redis_url = resolved_settings.redis_url.get_secret_value()
+        with open_redis_session_registry(
+            redis_url,
             checkpointer=checkpointer,
-            session_memory_store=None,
-        )
-        initial_state = create_runtime_initial_state(goal)
-        return CheckpointSession(
-            graph=graph,
-            thread_id=initial_state["thread_id"],
-        ).start(initial_state)
+            ttl_minutes=resolved_settings.checkpoint_ttl_minutes,
+        ) as registry, open_redis_session_memory_store(
+            redis_url,
+            ttl_hours=resolved_settings.session_memory_ttl_hours,
+            max_items=resolved_settings.session_memory_max_items,
+        ) as memory_store:
+            registry.require_latest(session_id, thread_id)
+            graph = build_runtime_graph(
+                planner=planner,
+                reviewer=reviewer,
+                worker_factory=worker_factory,
+                settings=resolved_settings,
+                progress=progress,
+                trace_recorder=trace_recorder,
+                checkpointer=checkpointer,
+                session_memory_store=memory_store,
+                execution_control=execution_control,
+                checkpoint_registry=registry,
+            )
+            checkpoint_session = CheckpointSession(graph=graph, thread_id=thread_id)
+            snapshot = checkpoint_session.snapshot()
+            if not snapshot.values:
+                raise RedisCheckpointError(
+                    f"没有找到 thread_id={thread_id} 的 Checkpoint。"
+                )
+            return checkpoint_session.resume()
